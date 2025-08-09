@@ -1,0 +1,41 @@
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Microphone</title>
+    <link rel="stylesheet" href="static/style.css">
+    <script src="static/script.js"></script>
+</head>
+<body>
+
+  {% if session['name'] %}
+  <script>microphoneName = "{{ session['name'] }}";</script>
+  <h1>Hello {{ session['name'] }}!</h1>
+
+  <button onclick="startMicrophone()">Start Microphone</button>
+  <button onclick="startSession()">Start Session</button>
+
+  <form method="post">
+    <button type="submit" name="reset">Reset</button>
+  </form>
+
+  <h2>Offer</h2>
+  <textarea class="form-control" id="offer" readonly="true"></textarea>
+
+  <h2>Answer</h2>
+  <textarea class="form-control" id="answer"></textarea>
+
+  <h2>Tracks</h2>
+  <div id="tracks"></div>
+</div>
+  {% else %}
+  <form method="post">
+    <label for="name">Enter your name:</label>
+    <input type="text" id="name" name="name" required>
+    <button type="submit">Submit</button>
+  </form>
+  {% endif %}
+
+</body>
+</html>
