@@ -1,11 +1,51 @@
-//answer = undefined
+debugOutputField = undefined
+startButton = undefined
+pc = undefined
 
 document.addEventListener('DOMContentLoaded', function() { 
-    document.getElementById('offer').value = ''
-    document.getElementById('answer').value = ''
+    startButton = document.getElementById('buttonStartMicrophone');
+
+    debugOutputField = document.getElementById('debugOutput');
+    debugOutputField.value = '';
+
+    document.getElementById('toggleDebug').addEventListener('click', function() {
+        if (debugOutputField.style.display === 'none' || debugOutputField.style.display === '') {
+            debugOutputField.style.display = 'block';
+        } else {
+            debugOutputField.style.display = 'none';
+        }
+    });
 });
 
+function setStatus(text) {
+    let statusElement = document.getElementById('status');
+    if (statusElement) {
+        statusElement.textContent = text;
+    } else {
+        console.warn('Status element not found');
+    }
+
+    if (text === 'Not Connected') {
+        startButton.textContent = 'Start Microphone';
+        startButton.disabled = false;
+    }
+    else if (text === 'Connected') {
+        startButton.textContent = 'Stop Microphone';
+        startButton.disabled = false;
+    }
+    else {
+        startButton.disabled = true;
+    }
+}
+
 function startMicrophone() {
+    if (pc && pc.iceConnectionState !== 'closed' && pc.iceConnectionState !== 'failed') {
+        printLog('Session already active, stopping current session...')
+        stopSession();
+        setStatus('Not Connected');
+        return;
+    }
+
     createSession();
 }
 
@@ -19,18 +59,24 @@ function createSession() {
     })
 
     pc.ontrack = function(event) {
-        printLog('Accepting new track')
+        // printLog('Accepting new track')
 
-        var el = document.createElement(event.track.kind)
+        // var el = document.createElement(event.track.kind)
 
-        el.srcObject = event.streams[0]
-        el.autoplay = true
-        el.controls = true
+        // el.srcObject = event.streams[0]
+        // el.autoplay = true
+        // el.controls = true
 
-        document.getElementById('tracks').appendChild(el)
+        // document.getElementById('tracks').appendChild(el)
     }
 
     pc.oniceconnectionstatechange = function(event) {
+        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+            printLog('ICE connection failed, stopping session...')
+            stopSession();
+            setStatus('Not Connected');
+            return;
+        }
         printLog('ICE connection state changed to ' + pc.iceConnectionState)
     }
 
@@ -60,6 +106,7 @@ function createSession() {
         video: false,
     }
 
+    setStatus('Requesting microphone access...');
     navigator.mediaDevices.getUserMedia(mediaOpts).
         then(addMic).
         catch(skipMic)
@@ -96,12 +143,12 @@ async function createOffer() {
 
     console.log('Sending offer to server:', offer)
 
-    // actually use fetch to access /api
     const params = new URLSearchParams();
     params.append('action', 'start_microphone');
     params.append('offer', offer.sdp);
     params.append('name', microphoneName);
 
+    setStatus('Connecting...');
     fetch('/api', {
         method: 'POST',
         body: params,
@@ -116,20 +163,17 @@ async function createOffer() {
             startSession(data.answer);
         } else {
             printLog('Error starting microphone: ' + data.error)
+            setStatus('Error starting microphone: ' + data.error);
         }
     })
     .catch(error => {
         printLog('Network error: ' + error.message)
+        setStatus('Error starting microphone: ' + data.error);
     })
 }
 
 
 function startSession(answer) {
-    // answer = document.getElementById('answer').value
-    // if (answer === '') {
-    //     return printLog('Error: SDP answer is not set')
-    // }
-
     printLog('Starting session...')
     printLog('Answer: ' + answer)
 
@@ -139,8 +183,14 @@ function startSession(answer) {
     })
 
     pc.setRemoteDescription(desc)
-        .then(printLog)
-        .catch(printLog)
+        .then(msg => {
+            printLog('Session started successfully')
+            setStatus('Connected');
+        })
+        .catch(err => {
+            printLog('Error setting remote description: ' + err)
+            setStatus('Error starting session: ' + err);
+        });
 }
 
 function stopSession() {
@@ -150,13 +200,38 @@ function stopSession() {
 
     printLog('Stopping session...')
 
+    setStatus('Diconnecting...');
+
+    const params = new URLSearchParams();
+    params.append('action', 'stop_microphone');
+    params.append('name', microphoneName);
+    fetch('/api', {
+        method: 'POST',
+        body: params,
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        printLog(JSON.stringify(data));
+        if (data.success) {
+            setStatus('Not Connected');
+        } else {
+            printLog('Error stopping microphone: ' + data.error)
+        }
+    })
+    .catch(error => {
+        printLog('Network error: ' + error.message)
+        setStatus('Error stopping microphone: ' + data.error);
+    })
+
     pc.close()
     pc = undefined
 }
 
 function printLog(msg) {
     console.log(msg)
-    // log = document.getElementById('log')
-    // log.value += msg + '\n'
-    // log.scrollTop = log.scrollHeight
+    debugOutputField.value += msg + '\n'
+    debugOutputField.scrollTop = debugOutputField.scrollHeight
 }

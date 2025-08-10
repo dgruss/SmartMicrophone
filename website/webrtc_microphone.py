@@ -37,7 +37,6 @@ class WebRTCMicrophone:
 
     def stop(self):
         logger.info(f"{self.name}: Stopping WebRTC microphone.")
-        self.__remove_virtual_sink()
         self.__stop_webrtc_process()
 
         
@@ -236,9 +235,10 @@ class WebRTCMicrophone:
         return state
 
 
-    async def __del__(self):
+    def __del__(self):
         logger.info(f"{self.name}: Cleaning up WebRTCMicrophone resources.")
-        await self.stop()
+        self.__remove_virtual_sink()
+        self.stop()
 
 
 class WebRTCMicrophoneManager:
@@ -262,7 +262,7 @@ class WebRTCMicrophoneManager:
         if name in self.microphones:
             logger.info(f"Microphone with name '{name}' already exists.")
 
-            await self.microphones[name].stop()
+            self.microphones[name].stop()
             return await self.microphones[name].start(offer)
 
         mic = WebRTCMicrophone(name)
@@ -270,10 +270,21 @@ class WebRTCMicrophoneManager:
         return await self.microphones[name].start(offer)
 
 
-    async def remove_microphone(self, name):
+    def stop_microphone(self, name):
+        if name not in self.microphones:
+            logger.warning(f"Tried to stop non-existent microphone '{name}'.")
+            return {'success': False, 'error': f"Microphone '{name}' not found."}
+
+        mic = self.microphones[name]
+        mic.stop()
+        del self.microphones[name]
+        return {'success': True, 'message': f"Microphone '{name}' stopped."}
+
+
+    def remove_microphone(self, name):
         mic = self.microphones.pop(name, None)
         if mic:
-            await mic.stop()
+            mic.stop()
             del mic
             logger.info(f"Removed WebRTCMicrophone '{name}'.")
             return {'success': True}
@@ -285,6 +296,7 @@ class WebRTCMicrophoneManager:
         logger.info("Stopping all WebRTCMicrophones...")
         for name, mic in self.microphones.items():
             mic.stop()
+            del mic
             logger.info(f"Stopped microphone '{name}'.")
 
         self.microphones.clear()

@@ -50,6 +50,12 @@ async def api():
 
         return jsonify(response)
     
+    elif action == 'stop_microphone':
+        name = request.form.get('name')
+
+        WebRTCMicrophoneManager().stop_microphone(name)
+        return jsonify({'success': True, 'message': f'Microphone {name} stopped.'})
+
     return jsonify({'success': False, 'error': 'Invalid action'})
 
 
