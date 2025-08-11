@@ -48,7 +48,7 @@ function setStatus(text, index = -1) {
     else if (text === 'Connected') {
         startButton.textContent = 'Stop Microphone';
         startButton.disabled = false;
-        statusElement.textContent += ' Index: ' + index
+        statusElement.textContent += ' to Mic No. ' + index
     }
     else {
         startButton.disabled = true;

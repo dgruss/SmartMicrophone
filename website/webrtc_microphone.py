@@ -105,7 +105,6 @@ class WebRTCMicrophone:
                 got_full_answer = True
 
         answer = ''.join(answer_lines)
-        self.proc.stdout.close()
 
         logger.info(f"{self.index}: Received answer from webrtc-cli process")
         # logger.debug(answer)
