@@ -3,18 +3,13 @@ A webserver and site that allows you to use your smartphone as a microphone with
 It supports multiple phones connecting, each creating a microphone on the host computer.
 
 ## Status
-This is not even a alpha version yet...
+Alpha
+It works, but is not very well tested
 
 
 ## Notes
 General notes during development
 
-#### Virtual Mic
-Use these commands to create a virtual speaker and connect it to a virtual mic:
-```
-pactl load-module module-null-sink sink_name="virt-mic-1-sink"
-pactl load-module module-remap-source master=virt-mic-1-sink.monitor source_name=virt-mic-1 source_properties=device.description=virt-mic-1
-```
 
 #### Captive Portals
 Information on captive portals:
