@@ -4,57 +4,59 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+MICROPHONE_COLORS = [
+    '#3357FF',  # Blue
+    '#FF5733',  # Red
+    '#33FF57',  # Green
+    '#FFA133',  # Orange
+    '#FF33A1',  # Pink
+    '#A133FF',  # Purple
+    '#33FFA1',  # Teal
+]
+
+MICROPHONE_COLORS_NAMES = [
+    'Blue',
+    'Red',
+    'Green',
+    'Orange',
+    'Pink',
+    'Purple',
+    'Teal'
+]
+
+
+
 
 class WebRTCMicrophone:
-    def __init__(self, name=None):
-        self.name = name
+    def __init__(self, index=None):
+        self.index = index
         self.proc = None
 
-        # pulse audio stream variables
-        self.sink_name = f'virt-mic-{self.name}-sink'
-        self.sink_id = None
-        self.source_name = f'virt-mic-{self.name}'
-        self.source_id = None
-
-        logger.info(f"{self.name}: WebRTCMicrophone initialized.")
+        logger.info(f"{self.index}: WebRTCMicrophone initialized.")
 
 
-    async def start(self, offer):
-        logger.info(f"{self.name}: Starting WebRTC microphone with offer")
+    def start(self, offer):
+        logger.info(f"{self.index}: Starting WebRTC microphone with offer")
         # logger.debug(offer)
-
-        if not self.name:
-            logger.error(f"{self.name}: Name must not be empty")
-            return {'success': False, 'error': 'Name must not be empty'}
-
-        if self.proc is None or self.proc.poll() is not None:
-            return await self.__start_new_process(offer)
-        else:
-            logger.info(f"{self.name}: start called but process already running, stopping and restarting.")
-            self.__stop_webrtc_process()
-            return await self.__start_new_process(offer)
+        return self.__start_new_process(offer)
 
 
     def stop(self):
-        logger.info(f"{self.name}: Stopping WebRTC microphone.")
+        logger.info(f"{self.index}: Stopping WebRTC microphone.")
         self.__stop_webrtc_process()
 
         
-    async def __start_new_process(self, offer):
+    def __start_new_process(self, offer):
         if not offer:
-            logger.error(f"{self.name}: Offer must not be empty")
+            logger.error(f"{self.index}: Offer must not be empty")
             return {'success': False, 'error': 'Offer must not be empty'}
-
-        result = await self.__create_virtual_sink()
-        if not result['success']:
-            return result
         
-        logger.debug(f"{self.name}: Starting new webrtc-cli process with offer: {offer}")
+        logger.debug(f"{self.index}: Starting new webrtc-cli process with offer: {offer}")
 
         # Start the webrtc-cli process
         self.proc = subprocess.Popen(['../webrtc-cli/webrtc-cli', 
                     '--answer', 
-                    '--sink', self.sink_name,
+                    '--sink', f'smartphone-mic-{self.index}-sink',
                     '--mode', 'lowdelay',
                     '--rate', '48000',
                     '--pulse-buf', '5ms',
@@ -76,7 +78,7 @@ class WebRTCMicrophone:
         if not check_result['success']:
             return check_result
 
-        logger.info(f"{self.name}: Started webrtc-cli process")
+        logger.info(f"{self.index}: Started webrtc-cli process")
 
         # Pipe the offer into the process
         self.proc.stdin.write(offer)
@@ -105,15 +107,15 @@ class WebRTCMicrophone:
         answer = ''.join(answer_lines)
         self.proc.stdout.close()
 
-        logger.info(f"{self.name}: Received answer from webrtc-cli process")
+        logger.info(f"{self.index}: Received answer from webrtc-cli process")
         # logger.debug(answer)
 
-        return {'success': True, 'answer': answer}
+        return {'success': True, 'answer': answer, 'index': self.index}
 
 
     def __check_webrtc_process(self):
         if self.proc.poll() is not None:
-            logger.error(f"{self.name}: webrtc-cli failed to start: {self.proc.poll()}")
+            logger.error(f"{self.index}: webrtc-cli failed to start: {self.proc.poll()}")
             lines = []
             while True:
                 line = self.proc.stdout.readline()
@@ -134,85 +136,20 @@ class WebRTCMicrophone:
 
 
     def __stop_webrtc_process(self):
-        logger.info(f"{self.name}: Stopping WebRTC process...")
+        logger.info(f"{self.index}: Stopping WebRTC process...")
         if self.proc is not None:
             try:
                 self.proc.terminate()
                 try:
                     self.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    logger.warning(f"{self.name}: Process did not terminate in time, killing.")
+                    logger.warning(f"{self.index}: Process did not terminate in time, killing.")
                     self.proc.kill()
                     self.proc.wait(timeout=2)
             except Exception as e:
-                logger.error(f"{self.name}: Error stopping process: {e}")
+                logger.error(f"{self.index}: Error stopping process: {e}")
             finally:
                 self.proc = None
-
-        
-    async def __create_virtual_sink(self):
-        # Create virtual microphone sink if it doesn't exist
-        sink_name = self.sink_name
-        source_name = self.source_name
-
-        logger.debug(f"{self.name}: Starting virtual sink '{sink_name}' and remap to '{source_name}'.")
-
-        try:
-            result = subprocess.run(
-                ['pactl', 'list', 'short', 'modules'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True
-            )
-            if sink_name not in result.stdout:
-                logger.info(f"{self.name}: Creating virtual microphone sink '{sink_name}' and remap to '{source_name}' source.")
-                create_result = subprocess.run(
-                    ['pactl', 'load-module', 'module-null-sink', f'sink_name={sink_name}'],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                if create_result.returncode != 0:
-                    logger.error(f"{self.name}: Failed to create virtual sink: {create_result.stderr.strip()}")
-                    return {'success': False, 'error': f"Failed to create virtual sink: {create_result.stderr.strip()}"}
-
-                self.sink_id = create_result.stdout.strip()
-
-                
-                create_result = subprocess.run(
-                    ['pactl', 'load-module', 'module-remap-source', f'master={sink_name}.monitor', f'source_name={source_name}', f'source_properties=device.description="Virtual Mic {self.name}"'],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                if create_result.returncode != 0:
-                    logger.error(f"{self.name}: Failed to remap source: {create_result.stderr.strip()}")
-                    return {'success': False, 'error': f"Failed to remap source: {create_result.stderr.strip()}"}
-                
-                self.source_id = create_result.stdout.strip()
-                logger.debug(f"{self.name}: Created virtual microphone sink '{sink_name}' with ID {self.sink_id} and source '{source_name}' with ID {self.source_id}.")
-
-            else:
-                logger.info(f"{self.name}: Virtual microphone sink '{sink_name}' already exists.")
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"{self.name}: Error running pactl: {e.stderr.strip()}")
-            return {'success': False, 'error': f"Error running pactl: {e.stderr.strip()}"}
-
-        return {'success': True}
-
-
-    def __remove_virtual_sink(self):
-        logger.info(f"{self.name}: Removing virtual microphone sink '{self.sink_name}' {self.sink_id} and source '{self.source_name}' {self.source_id}.")
-
-        if self.source_id is not None:
-            subprocess.run(['pactl', 'unload-module', self.source_id])
-
-        if self.sink_id is not None:
-            subprocess.run(['pactl', 'unload-module', self.sink_id])
-
-        logger.info(f"{self.name}: Removed virtual microphone sink '{self.sink_name}' and source '{self.source_name}'.")
 
 
     def get_state(self):
@@ -236,8 +173,7 @@ class WebRTCMicrophone:
 
 
     def __del__(self):
-        logger.info(f"{self.name}: Cleaning up WebRTCMicrophone resources.")
-        self.__remove_virtual_sink()
+        logger.info(f"{self.index}: Cleaning up WebRTCMicrophone resources.")
         self.stop()
 
 
@@ -254,52 +190,172 @@ class WebRTCMicrophoneManager:
     def __init__(self):
         if self._initialized:
             return
-        self.microphones = {}
         self._initialized = True
 
+    
+    def __del__(self):
+        self.__remove_virtual_sinks()
 
-    async def add_microphone(self, name, offer):
-        if name in self.microphones:
-            logger.info(f"Microphone with name '{name}' already exists.")
+    
+    def init(self, no_microphones = 4):
+        self.no_microphones = no_microphones
 
-            self.microphones[name].stop()
-            return await self.microphones[name].start(offer)
+        # create the virtual microphones as USDX has no device plug&play support
+        self.microphones = {}
+        self.source_ids = {}
+        self.sink_ids = {}
 
-        mic = WebRTCMicrophone(name)
-        self.microphones[name] = mic
-        return await self.microphones[name].start(offer)
-
-
-    def stop_microphone(self, name):
-        if name not in self.microphones:
-            logger.warning(f"Tried to stop non-existent microphone '{name}'.")
-            return {'success': False, 'error': f"Microphone '{name}' not found."}
-
-        mic = self.microphones[name]
-        mic.stop()
-        del self.microphones[name]
-        return {'success': True, 'message': f"Microphone '{name}' stopped."}
+        for i in range(no_microphones):
+            self.microphones[i] = None
+            self.source_ids[i] = None
+            self.sink_ids[i] = None
+            self.__create_virtual_sink(i)
 
 
-    def remove_microphone(self, name):
-        mic = self.microphones.pop(name, None)
-        if mic:
-            mic.stop()
-            del mic
-            logger.info(f"Removed WebRTCMicrophone '{name}'.")
-            return {'success': True}
+    def stop(self):
+        self.stop_all_microphones()
+        self.__remove_virtual_sinks()
 
-        logger.warning(f"Tried to remove non-existent microphone '{name}'.")
+
+    def __create_virtual_sink(self, index):
+        sink_name = f'smartphone-mic-{index}-sink'
+        source_name = f'smartphone-mic-{index}-source'
+        # Create virtual microphone sink if it doesn't exist
+
+        logger.debug(f"Creating virtual sink '{sink_name}' and remap to '{source_name}'.")
+
+        try:
+            result = subprocess.run(
+                ['pactl', 'list', 'short', 'modules'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True
+            )
+            if sink_name not in result.stdout:
+                logger.info(f"Creating virtual microphone sink '{sink_name}' and remap to '{source_name}' source.")
+                create_result = subprocess.run(
+                    ['pactl', 'load-module', 'module-null-sink', f'sink_name={sink_name}'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if create_result.returncode != 0:
+                    logger.error(f"Failed to create virtual sink: {create_result.stderr.strip()}")
+                    return {'success': False, 'error': f"Failed to create virtual sink: {create_result.stderr.strip()}"}
+
+                self.sink_ids[index] = create_result.stdout.strip()
+
+                
+                create_result = subprocess.run(
+                    ['pactl', 'load-module', 'module-remap-source', f'master={sink_name}.monitor', f'source_name={source_name}', f'source_properties=device.description="Smartphone-{index}-{MICROPHONE_COLORS_NAMES[index]}"'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if create_result.returncode != 0:
+                    logger.error(f"Failed to remap source: {create_result.stderr.strip()}")
+                    return {'success': False, 'error': f"Failed to remap source: {create_result.stderr.strip()}"}
+                
+                self.source_ids[index] = create_result.stdout.strip()
+                logger.debug(f"reated virtual microphone sink '{sink_name}' with ID {self.sink_ids[index]} and source '{source_name}' with ID {self.source_ids[index]}.")
+
+            else:
+                logger.info(f"Virtual microphone sink '{sink_name}' already exists.")
+
+                # Get the existing sink and source IDs
+                sink_id = None
+                source_id = None
+
+                for line in result.stdout.splitlines():
+                    if sink_name in line:
+                        sink_id = line.split()[0]
+                    if source_name in line:
+                        source_id = line.split()[0]
+
+                if not sink_id or not source_id:
+                    logger.error(f"Could not find IDs for existing sink '{sink_name}' or source '{source_name}'.")
+                    return {'success': False, 'error': 'Could not find IDs for existing sink or source.'}
+
+                self.sink_ids[index] = sink_id
+                self.source_ids[index] = source_id
+
+                logger.info(f"    It has ids: sink_id={self.sink_ids[index]}, source_id={self.source_ids[index]}")
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error running pactl: {e.stderr.strip()}")
+            return {'success': False, 'error': f"Error running pactl: {e.stderr.strip()}"}
+
         return {'success': True}
+
+
+    def __remove_virtual_sinks(self):
+        logger.info(f"Removing virtual microphone sinks and sources:")
+
+        for i in range(len(self.sink_ids)):
+            if self.sink_ids[i] is None:
+                continue
+
+            logger.info(f"    {self.sink_ids[i]}")
+            subprocess.run(['pactl', 'unload-module', self.sink_ids[i]])
+            self.sink_ids[i] = None
+
+        for i in range(len(self.source_ids)):
+            if self.source_ids[i] is None:
+                continue
+
+            logger.info(f"    {self.source_ids[i]}")
+            subprocess.run(['pactl', 'unload-module', self.source_ids[i]])
+            self.source_ids[i] = None
+
+        logger.info(f"Removed virtual microphone sinks and sources.")
+
+
+    def start_microphone(self, offer, index = -1):
+        if index > -1:
+            microphone_index = index
+        else:
+            # Get free microphone
+            microphone_index = -1
+            for i in range(self.no_microphones):
+                if self.microphones[i] is None:
+                    microphone_index = i
+                    break
+                elif self.microphones[i].get_state() == 'Not Connected':
+                    microphone_index = i
+                    break
+
+        if microphone_index == -1:
+            return {'success': False, 'error': 'No free microphones available.'}
+
+        if self.microphones[microphone_index] is not None:
+            self.microphones[microphone_index].stop()
+            del self.microphones[microphone_index]
+            self.microphones[index] = None
+
+        mic = WebRTCMicrophone(microphone_index)
+        self.microphones[microphone_index] = mic
+        return mic.start(offer)
+
+
+    def stop_microphone(self, index):
+        if index < 0 or index >= self.no_microphones:
+            return {'success': True, 'message': f"Microphone '{index}' stopped."}
+
+        mic = self.microphones[index]
+        if mic is not None:
+            mic.stop()
+            del self.microphones[index]
+            self.microphones[index] = None
+
+        return {'success': True, 'message': f"Microphone '{index}' stopped."}
+
 
     def stop_all_microphones(self):
         logger.info("Stopping all WebRTCMicrophones...")
-        for name, mic in self.microphones.items():
-            mic.stop()
-            del mic
-            logger.info(f"Stopped microphone '{name}'.")
+        for i in range(self.no_microphones):
+            self.stop_microphone(i)
 
-        self.microphones.clear()
         logger.info("All microphones stopped and cleared.")
 
 

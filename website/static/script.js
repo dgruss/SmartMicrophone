@@ -2,6 +2,16 @@ debugOutputField = undefined
 startButton = undefined
 pc = undefined
 
+const MICROPHONE_COLORS = [
+    '#3357FF',  // Blue
+    '#FF5733',  // Red
+    '#33FF57',  // Green
+    '#FFA133',  // Orange
+    '#FF33A1',  // Pink
+    '#A133FF',  // Purple
+    '#33FFA1',  // Teal
+]
+
 document.addEventListener('DOMContentLoaded', function() { 
     startButton = document.getElementById('buttonStartMicrophone');
 
@@ -15,9 +25,15 @@ document.addEventListener('DOMContentLoaded', function() {
             debugOutputField.style.display = 'none';
         }
     });
+
+    if (automaticallyReconnect) {
+        printLog('Automatically reconnecting to microphone...');
+        setStatus('Connecting...');
+        startMicrophone();
+    }
 });
 
-function setStatus(text) {
+function setStatus(text, index = -1) {
     let statusElement = document.getElementById('status');
     if (statusElement) {
         statusElement.textContent = text;
@@ -32,9 +48,19 @@ function setStatus(text) {
     else if (text === 'Connected') {
         startButton.textContent = 'Stop Microphone';
         startButton.disabled = false;
+        statusElement.textContent += ' Index: ' + index
     }
     else {
         startButton.disabled = true;
+    }
+
+    if (text === 'Connected') {
+        document.body.style.backgroundColor = MICROPHONE_COLORS[index % MICROPHONE_COLORS.length];
+        document.body.style.color = '#FFFFFF';  // Change text color to white for better contrast
+    }
+    else {
+        document.body.style.backgroundColor = '#FFFFFF';
+        document.body.style.color = '#000';
     }
 }
 
@@ -58,17 +84,7 @@ function createSession() {
         'iceServers': [{ 'url': 'stun:stun.l.google.com:19302' }]
     })
 
-    pc.ontrack = function(event) {
-        // printLog('Accepting new track')
-
-        // var el = document.createElement(event.track.kind)
-
-        // el.srcObject = event.streams[0]
-        // el.autoplay = true
-        // el.controls = true
-
-        // document.getElementById('tracks').appendChild(el)
-    }
+    pc.ontrack = function(event) {}
 
     pc.oniceconnectionstatechange = function(event) {
         if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
@@ -146,7 +162,6 @@ async function createOffer() {
     const params = new URLSearchParams();
     params.append('action', 'start_microphone');
     params.append('offer', offer.sdp);
-    params.append('name', microphoneName);
 
     setStatus('Connecting...');
     fetch('/api', {
@@ -154,13 +169,14 @@ async function createOffer() {
         body: params,
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded'
-        }
+        },
+        credentials: "include"
     })
     .then(response => response.json())
     .then(data => {
         printLog(JSON.stringify(data));
         if (data.success) {
-            startSession(data.answer);
+            startSession(data.answer, data.index);
         } else {
             printLog('Error starting microphone: ' + data.error)
             setStatus('Error starting microphone: ' + data.error);
@@ -173,7 +189,7 @@ async function createOffer() {
 }
 
 
-function startSession(answer) {
+function startSession(answer, index) {
     printLog('Starting session...')
     printLog('Answer: ' + answer)
 
@@ -185,7 +201,7 @@ function startSession(answer) {
     pc.setRemoteDescription(desc)
         .then(msg => {
             printLog('Session started successfully')
-            setStatus('Connected');
+            setStatus('Connected', index);
         })
         .catch(err => {
             printLog('Error setting remote description: ' + err)
@@ -204,13 +220,13 @@ function stopSession() {
 
     const params = new URLSearchParams();
     params.append('action', 'stop_microphone');
-    params.append('name', microphoneName);
     fetch('/api', {
         method: 'POST',
         body: params,
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded'
-        }
+        },
+        credentials: "include"
     })
     .then(response => response.json())
     .then(data => {

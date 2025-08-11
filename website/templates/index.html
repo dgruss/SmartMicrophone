@@ -86,13 +86,15 @@
       color: #333;
     }
   </style>
+  <script>
+    var microphoneIndex = {{ session.get('microphone_index', 'undefined') }};
+    var automaticallyReconnect = {{ 'true' if automatically_reconnect else 'false' }};
+  </script>
   <script src="static/script.js"></script>
 </head>
 <body>
   <h1>Virtual Microphone</h1>
-  {% if session['name'] %}
-  <script>microphoneName = "{{ session['name'] }}";</script>
-  <h2>Hello {{ session['name'] }}!</h2>
+  <h2 id="name"></h2>
 
   <button onclick="startMicrophone()" id="buttonStartMicrophone">Start Microphone</button>
 
@@ -102,13 +104,5 @@
     <button id="toggleDebug">Toggle Debug Output</button>
     <textarea id="debugOutput" readonly></textarea>
   </div>
-</div>
-  {% else %}
-  <form method="post">
-    <!--<label for="name">Enter your name:</label>-->
-    <input type="text" id="name" name="name" placeholder="Enter your name" required>
-    <button type="submit">Create</button>
-  </form>
-  {% endif %}
 </body>
 </html>
