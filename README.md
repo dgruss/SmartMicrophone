@@ -1,15 +1,14 @@
-# Virtual Microphone using WebRTC
+# Smartphone Microphone using WebRTC
 A webserver and site that allows you to use your smartphone as a microphone with as little latency as possible.
 It supports multiple phones connecting, each creating a microphone on the host computer.
 
 ## Status
 Alpha
-It works, but is not very well tested
 
+It works, but is not very well tested
 
 ## Notes
 General notes during development
-
 
 #### Captive Portals
 Information on captive portals:
