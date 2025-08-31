@@ -2,6 +2,7 @@
 #!/usr/bin/env python3
 
 from flask import Flask, render_template, request, jsonify, session, send_file, send_from_directory
+from flask import Response, stream_with_context
 import os
 from markupsafe import escape
 import random
@@ -11,6 +12,8 @@ import signal
 from webrtc_microphone import WebRTCMicrophone, WebRTCMicrophoneManager
 import subprocess
 import json
+import threading
+import queue
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +22,78 @@ microphone_assignments = [None] * 6  # 6 microphones: Blue, Red, Green, Orange, 
 remote_control_user = ""  # empty string means free
 remote_control_text = ""
 
+# Global rooms mapping: room name -> list of usernames
+ROOMS = {
+    'lobby': [],
+    'mic1': [],
+    'mic2': [],
+    'mic3': [],
+    'mic4': [],
+    'mic5': [],
+    'mic6': []
+}
+
+# Optional mapping of session id -> username for quick lookup
+SESSION_USERNAMES = {}
+
+# SSE listeners will be set up after the Flask app is created to avoid
+# referencing `app` before initialization.
+
 # In-memory songs index (populated at startup or on demand)
 SONGS_LIST = None   # list of song entries
 SONGS_BY_ID = {}    # map id (str) -> entry
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'eeWeidai3oSui8aike9vahyoh6kif2Uu')
+
+# SSE listeners for real-time room updates (list of queue.Queue)
+ROOMS_LISTENERS = []
+ROOMS_LISTENERS_LOCK = threading.Lock()
+
+
+def notify_rooms_update():
+    """Push the current rooms map to all SSE listeners."""
+    payload = json.dumps({'rooms': ROOMS})
+    with ROOMS_LISTENERS_LOCK:
+        for q in list(ROOMS_LISTENERS):
+            try:
+                q.put(payload, block=False)
+            except Exception:
+                try:
+                    q.put(payload)
+                except Exception:
+                    pass
+
+
+@app.route('/rooms/stream')
+def rooms_stream():
+    """Server-Sent Events stream that emits room updates as JSON.
+
+    Clients should connect with EventSource('/rooms/stream').
+    """
+    q = queue.Queue()
+    with ROOMS_LISTENERS_LOCK:
+        ROOMS_LISTENERS.append(q)
+
+    def gen():
+        # initial state
+        try:
+            yield f"data: {json.dumps({'rooms': ROOMS})}\n\n"
+            while True:
+                data = q.get()
+                yield f"data: {data}\n\n"
+        except GeneratorExit:
+            # client disconnected
+            return
+        finally:
+            # clean up listener
+            with ROOMS_LISTENERS_LOCK:
+                try:
+                    ROOMS_LISTENERS.remove(q)
+                except ValueError:
+                    pass
+
+    return Response(stream_with_context(gen()), mimetype='text/event-stream')
 
 
 @app.before_request
@@ -391,6 +460,97 @@ def load_songs_index():
 @app.route('/songs/index', methods=['GET'])
 def songs_index():
     return jsonify({'success': True, 'count': len(load_songs_index()), 'items': load_songs_index()})
+
+
+@app.route('/rooms', methods=['GET'])
+def rooms_list():
+    """Return the current rooms mapping (room -> list of usernames)."""
+    try:
+        # Return a shallow copy to avoid accidental modifications by client
+        return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+    except Exception as e:
+        logger.exception('Failed to list rooms: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/rooms/join', methods=['POST'])
+def rooms_join():
+    """Join a room. JSON: {room: 'lobby'|'mic1'|..., name: 'displayname'}"""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        room = data.get('room', 'lobby')
+        name = data.get('name', '')
+        if room not in ROOMS:
+            return jsonify({'success': False, 'error': 'Unknown room'}), 400
+
+        # ensure session id
+        sid = session.get('session_id')
+        if not sid:
+            sid = random.randint(1000000, 9999999)
+            session['session_id'] = sid
+
+        # record username for session
+        username = str(name) if name else SESSION_USERNAMES.get(sid, f'user-{sid}')
+        SESSION_USERNAMES[sid] = username
+
+        # Remove from any other rooms first
+        for r, users in ROOMS.items():
+            ROOMS[r] = [u for u in users if u != username]
+
+        # Add to target room
+        ROOMS[room].append(username)
+        # Notify SSE listeners of update
+        try:
+            notify_rooms_update()
+        except Exception:
+            pass
+        logger.info('Session %s joined room %s as %s', sid, room, username)
+        return jsonify({'success': True, 'room': room, 'name': username, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+    except Exception as e:
+        logger.exception('Failed to join room: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/rooms/leave', methods=['POST'])
+def rooms_leave():
+    """Leave the current room for this session. JSON: {name: 'displayname'} (name optional)."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        name = data.get('name', None)
+
+        sid = session.get('session_id')
+        if not sid and not name:
+            return jsonify({'success': False, 'error': 'No session or name provided'}), 400
+
+        username = None
+        if name:
+            username = str(name)
+        else:
+            username = SESSION_USERNAMES.get(sid)
+
+        if not username:
+            return jsonify({'success': False, 'error': 'Unknown user'}), 400
+
+        # Remove user from all rooms
+        for r, users in ROOMS.items():
+            ROOMS[r] = [u for u in users if u != username]
+
+        # Optionally remove session->username mapping
+        if sid and sid in SESSION_USERNAMES:
+            try:
+                del SESSION_USERNAMES[sid]
+            except Exception:
+                pass
+
+        logger.info('User %s left all rooms', username)
+        try:
+            notify_rooms_update()
+        except Exception:
+            pass
+        return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+    except Exception as e:
+        logger.exception('Failed to leave room: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/songs/search', methods=['GET'])

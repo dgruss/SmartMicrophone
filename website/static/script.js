@@ -448,32 +448,70 @@ document.addEventListener('DOMContentLoaded', function() {
         };
     }
 
-    function joinLobby() {
-    printLog(`You joined the lobby. Current lobby users: [${rooms.lobby.join(', ')}]`);
-    printLog(`Room state: ${JSON.stringify(rooms)}`);
-    printLog(`Joined lobby. Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
-        // Remove user from all rooms
-        Object.keys(rooms).forEach(room => {
-            rooms[room] = rooms[room].filter(u => u !== userName);
-        });
-        // Add to lobby
+    async function joinLobby() {
+        printLog(`Attempting to join lobby as ${userName}`);
+        // Try server-side join first
+        try {
+            const res = await fetch('/rooms/join', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'include',
+                body: JSON.stringify({room: 'lobby', name: userName})
+            });
+            const data = await res.json();
+            if (data && data.success) {
+                rooms = data.rooms || rooms;
+                // server may have normalized the display name
+                if (data.name) { userName = data.name; localStorage.setItem('userName', userName); }
+                printLog(`Joined lobby (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
+                updateRoomDisplays();
+                updateDebugBanner();
+                return;
+            } else {
+                printLog('Server join failed: ' + (data && data.error));
+            }
+        } catch (e) {
+            printLog('Server join error: ' + e);
+        }
+
+        // Fallback: local-only behavior if server not reachable
+        printLog(`You joined the lobby. Current lobby users: [${rooms.lobby.join(', ')}]`);
+        Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
         rooms.lobby.push(userName);
         updateRoomDisplays();
-    updateDebugBanner();
+        updateDebugBanner();
     }
 
-    function selectMicBox(micNum) {
-    printLog(`You joined mic${micNum}. Current mic${micNum} users: [${rooms['mic'+micNum].join(', ')}]`);
-    printLog(`Room state: ${JSON.stringify(rooms)}`);
-    printLog(`Joined mic${micNum}. Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
-        // Remove user from all rooms
-        Object.keys(rooms).forEach(room => {
-            rooms[room] = rooms[room].filter(u => u !== userName);
-        });
-        // Add to selected mic room
+    async function selectMicBox(micNum) {
+        const target = 'mic' + micNum;
+        printLog(`Attempting to join ${target} as ${userName}`);
+        try {
+            const res = await fetch('/rooms/join', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'include',
+                body: JSON.stringify({room: target, name: userName})
+            });
+            const data = await res.json();
+            if (data && data.success) {
+                rooms = data.rooms || rooms;
+                if (data.name) { userName = data.name; localStorage.setItem('userName', userName); }
+                printLog(`Joined ${target} (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
+                updateRoomDisplays();
+                updateDebugBanner();
+                return;
+            } else {
+                printLog('Server join failed: ' + (data && data.error));
+            }
+        } catch (e) {
+            printLog('Server join error: ' + e);
+        }
+
+        // Fallback to local-only behavior if server not available
+        Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
         rooms['mic' + micNum].push(userName);
         updateRoomDisplays();
-    updateDebugBanner();
+        updateDebugBanner();
     }
 
     function updateRoomDisplays() {
@@ -547,11 +585,48 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Demo: live update (simulate other users joining/leaving)
-    setInterval(() => {
-        // TODO: Replace with real API polling
+    // Live update: poll server for authoritative room list every 2s
+    async function refreshRoomsFromServer() {
+        try {
+            const res = await fetch('/rooms', {credentials: 'include'});
+            const data = await res.json();
+            if (data && data.success && data.rooms) {
+                rooms = data.rooms;
+                updateRoomDisplays();
+                updateDebugBanner();
+                return;
+            }
+        } catch (e) {
+            // ignore network errors and keep local state
+        }
+        // fallback: just refresh UI from local rooms
         updateRoomDisplays();
-    }, 2000);
+    }
+    // initial refresh and interval
+    refreshRoomsFromServer();
+    setInterval(refreshRoomsFromServer, 2000);
+
+    // Try real-time updates via Server-Sent Events. If SSE is available on the
+    // server, this will push immediate room updates; polling remains as a
+    // fallback.
+    try {
+        if (typeof EventSource !== 'undefined') {
+            const es = new EventSource('/rooms/stream');
+            es.addEventListener('message', (ev) => {
+                try {
+                    const payload = JSON.parse(ev.data || '{}');
+                    if (payload && payload.rooms) {
+                        rooms = payload.rooms;
+                        updateRoomDisplays();
+                        updateDebugBanner();
+                        printLog('Received SSE rooms update');
+                    }
+                } catch (e) { /* ignore parse errors */ }
+            });
+            es.addEventListener('open', () => printLog('SSE connected to /rooms/stream'));
+            es.addEventListener('error', (e) => { printLog('SSE error: ' + e); es.close(); });
+        }
+    } catch (e) { printLog('SSE not available: ' + e); }
     // remove duplicate/leftover functions and checks
 });
 
