@@ -42,9 +42,11 @@ def index():
 
     # maybe this person just reloaded but still has a microphone running
     if 'session_id' in session and is_youngest_session():
-        logger.info(f"Session {session['session_id']} is still active, automatically reconnecting microphone {session['microphone_index']}.")
-        # this session is the youngest, automatically reconnect the microphone
-        automatically_reconnect = True
+        mic_idx = session.get('microphone_index')
+        logger.info("Session %s is still active, automatically reconnecting microphone %s.", session.get('session_id'), mic_idx)
+        # only reconnect automatically if we actually have a microphone index in the session
+        if mic_idx is not None:
+            automatically_reconnect = True
 
     return render_template('index.html')
 
@@ -147,6 +149,164 @@ def is_youngest_session():
                 youngest_session = False
 
     return youngest_session
+
+
+# Control tab: single-user lock and key sending via xdotool (if available)
+CONTROL_OWNER = None       # session id who currently owns the control
+CONTROL_OWNER_NAME = None  # human name for display
+CONTROL_TIMESTAMP = 0
+ULTRASTAR_WINDOW_ID = 0    # cached window id for UltraStar (0 = unknown/not found)
+
+def run_xdotool_command(args):
+    """Run xdotool and always target the UltraStar window.
+
+    The UltraStar window id is discovered on first use via:
+        xdotool search UltraStar
+    The id is cached in ULTRASTAR_WINDOW_ID. If not found, return an error.
+    `args` is a list of xdotool arguments (e.g. ['type', '--delay', '0', 'text']).
+    """
+    try:
+        # check xdotool first
+        which = subprocess.run(['which', 'xdotool'], capture_output=True, text=True)
+        if which.returncode != 0 or not which.stdout.strip():
+            logger.warning('xdotool not found on system; control commands will be logged but not sent')
+            return False, 'xdotool not installed'
+
+        # Prepare command args
+        if isinstance(args, dict):
+            cmd_args = list(args.get('args', []))
+        else:
+            cmd_args = list(args)
+
+        # Ensure we have cached UltraStar window id
+        global ULTRASTAR_WINDOW_ID
+        if not ULTRASTAR_WINDOW_ID:
+            try:
+                # Use the simpler search as requested: `xdotool search UltraStar`
+                ws = subprocess.run(['xdotool', 'search', 'UltraStar'], capture_output=True, text=True)
+                ids = [l.strip() for l in ws.stdout.splitlines() if l.strip()]
+                if ids:
+                    ULTRASTAR_WINDOW_ID = ids[0]
+                    logger.info('Cached UltraStar window id: %s', ULTRASTAR_WINDOW_ID)
+                else:
+                    logger.warning('No UltraStar window found via `xdotool search UltraStar`')
+                    return False, 'window not found'
+            except Exception as e:
+                logger.exception('Error searching for UltraStar window: %s', e)
+                return False, str(e)
+
+        # construct full command, inserting --window <id> after the subcommand
+        # args are expected like ['key', 'BackSpace'] or ['type', '--delay', '0', 'text']
+        if not cmd_args:
+            logger.warning('run_xdotool_command called with empty args')
+            return False, 'empty args'
+        subcmd = cmd_args[0]
+        rest = cmd_args[1:]
+        full_cmd = ['xdotool', subcmd, '--window', str(ULTRASTAR_WINDOW_ID)] + rest
+
+        proc2 = subprocess.run(full_cmd, capture_output=True, text=True)
+        if proc2.returncode != 0:
+            logger.warning('xdotool failed: %s %s', full_cmd, proc2.stderr)
+            return False, proc2.stderr
+        return True, proc2.stdout
+    except Exception as e:
+        logger.exception('Error running xdotool: %s', e)
+        return False, str(e)
+
+
+@app.route('/control/status', methods=['GET'])
+def control_status():
+    global CONTROL_OWNER, CONTROL_OWNER_NAME, CONTROL_TIMESTAMP
+    return jsonify({'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME, 'timestamp': CONTROL_TIMESTAMP})
+
+
+@app.route('/control/acquire', methods=['POST'])
+def control_acquire():
+    global CONTROL_OWNER, CONTROL_OWNER_NAME, CONTROL_TIMESTAMP
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get('name', '')
+    sid = session.get('session_id')
+    if not sid:
+        # create a session id for controller
+        sid = random.randint(1000000, 9999999)
+        session['session_id'] = sid
+    if CONTROL_OWNER and CONTROL_OWNER != sid:
+        return jsonify({'success': False, 'error': 'Control already taken', 'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME}), 409
+    CONTROL_OWNER = sid
+    CONTROL_OWNER_NAME = name or CONTROL_OWNER_NAME or 'Controller'
+    CONTROL_TIMESTAMP = time.time()
+    logger.info('Control acquired by %s (%s)', CONTROL_OWNER_NAME, CONTROL_OWNER)
+    return jsonify({'success': True, 'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME})
+
+
+@app.route('/control/release', methods=['POST'])
+def control_release():
+    global CONTROL_OWNER, CONTROL_OWNER_NAME, CONTROL_TIMESTAMP
+    sid = session.get('session_id')
+    if not sid or CONTROL_OWNER != sid:
+        return jsonify({'success': False, 'error': 'Not owner'}), 403
+    CONTROL_OWNER = None
+    CONTROL_OWNER_NAME = None
+    CONTROL_TIMESTAMP = 0
+    logger.info('Control released by session %s', sid)
+    return jsonify({'success': True})
+
+
+@app.route('/control/keystroke', methods=['POST'])
+def control_keystroke():
+    global CONTROL_OWNER
+    data = request.get_json(force=True, silent=True) or {}
+    key = data.get('key')
+    sid = session.get('session_id')
+    if not sid or CONTROL_OWNER != sid:
+        return jsonify({'success': False, 'error': 'Not owner'}), 403
+    if not key:
+        return jsonify({'success': False, 'error': 'Missing key'}), 400
+
+    # sanitize and map keys to xdotool names
+    allowed_special = {
+        'Escape': 'Escape', 'Esc': 'Escape', 'Enter': 'Return', 'Return': 'Return', 'Backspace': 'BackSpace',
+        'Space': 'space', 'ArrowLeft': 'Left', 'ArrowRight': 'Right', 'ArrowUp': 'Up', 'ArrowDown': 'Down'
+    }
+    # If single printable character, send via type
+    if len(key) == 1:
+        ok, out = run_xdotool_command(['type', '--delay', '0', key])
+        if not ok:
+            return jsonify({'success': False, 'error': out}), 500
+        return jsonify({'success': True})
+    # map special
+    mapped = allowed_special.get(key)
+    if not mapped:
+        return jsonify({'success': False, 'error': 'Unsupported key'}), 400
+    ok, out = run_xdotool_command(['key', mapped])
+    if not ok:
+        return jsonify({'success': False, 'error': out}), 500
+    return jsonify({'success': True})
+
+
+@app.route('/control/text', methods=['POST'])
+def control_text():
+    global CONTROL_OWNER
+    data = request.get_json(force=True, silent=True) or {}
+    text = data.get('text', '')
+    sid = session.get('session_id')
+    if not sid or CONTROL_OWNER != sid:
+        return jsonify({'success': False, 'error': 'Not owner'}), 403
+
+    # strategy: send 20 backspaces then type the full text
+    try:
+        # send backspaces
+        for _ in range(20):
+            run_xdotool_command(['key', 'BackSpace'])
+        # send the text
+        if text:
+            ok, out = run_xdotool_command(['type', '--delay', '0', text])
+            if not ok:
+                return jsonify({'success': False, 'error': out}), 500
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.exception('Error sending control text: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 def get_mic_assignments():
@@ -466,4 +626,4 @@ if __name__ == '__main__':
 
     # Set the port to 5000 or any other port you prefer
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)#, ssl_context=("../../fullchain.pem", "../../privkey.pem"))
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False, ssl_context=("../../fullchain.pem", "../../privkey.pem"))

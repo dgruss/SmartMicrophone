@@ -46,6 +46,52 @@ document.addEventListener('DOMContentLoaded', function() {
     setActiveTab(tabMic);
 });
 
+// Ensure tab switching shows the correct panels (songs/control/settings)
+document.addEventListener('DOMContentLoaded', function() {
+    const tabMic = document.getElementById('tabMic');
+    const tabSongs = document.getElementById('tabSongs');
+    const tabControl = document.getElementById('tabControl');
+    const tabSettings = document.getElementById('tabSettings');
+    const mainLobby = document.getElementById('mainLobby');
+    const songsPanel = document.getElementById('songsPanel');
+    const controlPanel = document.getElementById('controlPanel');
+    const settingsPanel = document.getElementById('settingsPanel');
+
+    // track active tab for auto-release behavior
+    let activeTab = tabMic;
+
+    function showTab(tab) {
+        [tabMic, tabSongs, tabControl, tabSettings].forEach(btn => btn && btn.classList.remove('active'));
+        if (tab) tab.classList.add('active');
+
+        // show/hide panels
+        if (mainLobby) mainLobby.style.display = (tab === tabMic) ? 'flex' : 'none';
+        if (songsPanel) songsPanel.style.display = (tab === tabSongs) ? 'flex' : 'none';
+        if (controlPanel) controlPanel.style.display = (tab === tabControl) ? 'flex' : 'none';
+        if (settingsPanel) settingsPanel.style.display = (tab === tabSettings) ? 'flex' : 'none';
+
+        // auto-acquire/release when switching to/from Control
+        if (activeTab !== tab) {
+            // leaving control tab -> release
+            if (activeTab === tabControl) {
+                try { window.releaseControl && window.releaseControl(); } catch(e){}
+            }
+            // entering control tab -> acquire
+            if (tab === tabControl) {
+                try { window.acquireControl && window.acquireControl(); } catch(e){}
+            }
+            activeTab = tab;
+        }
+    }
+
+    if (tabMic) tabMic.addEventListener('click', () => showTab(tabMic));
+    if (tabSongs) tabSongs.addEventListener('click', () => showTab(tabSongs));
+    if (tabControl) tabControl.addEventListener('click', () => showTab(tabControl));
+    if (tabSettings) tabSettings.addEventListener('click', () => showTab(tabSettings));
+    // initialize
+    showTab(tabMic);
+});
+
 // Songs UI logic
 document.addEventListener('DOMContentLoaded', function() {
     const songsPanel = document.getElementById('songsPanel');
@@ -83,13 +129,9 @@ document.addEventListener('DOMContentLoaded', function() {
         // clear UI
         try { if (window._currentPlayButton) window._currentPlayButton.textContent = '▶'; } catch(e){}
         try { if (window._currentSlider) { window._currentSlider.style.display = 'none'; window._currentSlider.max = 0; window._currentSlider.value = 0; window._currentSlider.oninput = null; } } catch(e){}
-        try { if (window._currentTimeLabel) window._currentTimeLabel.textContent = '0:00'; } catch(e){}
-        try { if (window._currentDurationLabel) window._currentDurationLabel.textContent = ''; } catch(e){}
         // unset globals
         try { window._currentAudio = null; } catch(e){}
         try { window._currentSlider = null; } catch(e){}
-        try { window._currentTimeLabel = null; } catch(e){}
-        try { window._currentDurationLabel = null; } catch(e){}
         try { window._currentPlayButton = null; } catch(e){}
         currentAudio = null;
         currentPlayButton = null;
@@ -133,21 +175,9 @@ document.addEventListener('DOMContentLoaded', function() {
             slider.min = 0;
             slider.max = 0;
             slider.value = 0;
-            slider.style.width = '220px';
+            slider.style.width = '52px';
             slider.style.display = 'none';
             slider.title = 'Seek';
-
-            const timeLabel = document.createElement('span');
-            timeLabel.textContent = '0:00';
-            timeLabel.style.marginLeft = '8px';
-            timeLabel.style.fontSize = '0.9em';
-            timeLabel.style.color = '#444';
-
-            const durationLabel = document.createElement('span');
-            durationLabel.textContent = '';
-            durationLabel.style.marginLeft = '6px';
-            durationLabel.style.fontSize = '0.9em';
-            durationLabel.style.color = '#666';
 
             // helper to format seconds -> M:SS
             function fmt(t) {
@@ -183,8 +213,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 // store globals so other rows can clear them
                 window._currentAudio = currentAudio;
                 window._currentSlider = slider;
-                window._currentTimeLabel = timeLabel;
-                window._currentDurationLabel = durationLabel;
                 window._currentPlayButton = previewBtn;
 
                 currentPlayingId = it.id;
@@ -199,7 +227,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     try {
                         const dur = isFinite(currentAudio.duration) ? Math.floor(currentAudio.duration) : 0;
                         slider.max = dur;
-                        durationLabel.textContent = fmt(dur);
                     } catch (e) {}
                 };
                 currentAudio._boundLoadedMetadata = onLoaded;
@@ -210,7 +237,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     try {
                         const t = Math.floor(currentAudio.currentTime || 0);
                         slider.value = t;
-                        timeLabel.textContent = fmt(t);
                     } catch (e) {}
                 };
                 currentAudio._boundTimeUpdate = boundTimeUpdate;
@@ -271,8 +297,6 @@ document.addEventListener('DOMContentLoaded', function() {
             previewContainer.style.gap = '8px';
             previewContainer.appendChild(previewBtn);
             previewContainer.appendChild(slider);
-            previewContainer.appendChild(timeLabel);
-            previewContainer.appendChild(durationLabel);
 
             actions.appendChild(previewContainer);
             actions.appendChild(addBtn);
@@ -453,7 +477,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function updateRoomDisplays() {
-    printLog(`Room state updated: ${JSON.stringify(rooms)}`);
+    //printLog(`Room state updated: ${JSON.stringify(rooms)}`);
         // Update lobby
         lobbyNamesDiv.innerHTML = '';
         if (rooms.lobby.length === 0) {
@@ -478,7 +502,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 userSpan.innerHTML = '';
             }
         });
-        printLog(`Room state updated: ${JSON.stringify(rooms)}`);
+        //printLog(`Room state updated: ${JSON.stringify(rooms)}`);
     }
 
     function updateDebugBanner() {
@@ -759,3 +783,272 @@ function stopSession() {
 }
 
 // Ensure a single printLog exists; other definitions earlier handle debugOutputField.
+
+// --- Control tab behavior ---
+document.addEventListener('DOMContentLoaded', function() {
+    const controlAcquireBtn = document.getElementById('controlAcquireBtn');
+    const controlReleaseBtn = document.getElementById('controlReleaseBtn');
+    const controlOwnerDiv = document.getElementById('controlOwner');
+    const controlTextInput = document.getElementById('controlTextInput');
+    const keyboardButtonsDiv = document.getElementById('keyboardButtons');
+
+    let controlOwner = null;
+    let controlName = null;
+
+    function updateControlUI() {
+        if (!controlOwner) {
+            controlOwnerDiv.textContent = 'Control: free';
+            controlAcquireBtn.style.display = 'inline-block';
+            if (controlReleaseBtn) controlReleaseBtn.style.display = 'none';
+            if (controlTextInput) controlTextInput.disabled = true;
+        } else {
+            controlOwnerDiv.textContent = `Control: ${controlName || controlOwner}`;
+            controlAcquireBtn.style.display = 'none';
+            if (controlReleaseBtn) controlReleaseBtn.style.display = 'inline-block';
+            if (controlTextInput) controlTextInput.disabled = (localStorage.getItem('userName') !== controlName);
+        }
+    }
+
+    async function fetchControlStatus() {
+        try {
+            const res = await fetch('/control/status');
+            const data = await res.json();
+            if (data) {
+                controlOwner = data.owner;
+                controlName = data.owner_name;
+                updateControlUI();
+            }
+        } catch (e) {
+            printLog('Failed to fetch control status: ' + e);
+        }
+    }
+
+    // Acquire / release
+    async function acquireControl() {
+        try {
+            const name = localStorage.getItem('userName') || '';
+            const res = await fetch('/control/acquire', {method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name: name}), credentials: 'include'});
+            const data = await res.json();
+            if (data && data.success) {
+                controlOwner = data.owner;
+                controlName = data.owner_name;
+                updateControlUI();
+                printLog('Acquired control');
+            } else {
+                printLog('Failed to acquire control: ' + (data && data.error));
+            }
+            return data;
+        } catch (e) { printLog('Error acquiring control: '+e); }
+    }
+
+    async function releaseControl() {
+        try {
+            const res = await fetch('/control/release', {method: 'POST', credentials: 'include'});
+            const data = await res.json();
+            if (data && data.success) {
+                controlOwner = null; controlName = null;
+                updateControlUI();
+                printLog('Released control');
+            } else {
+                printLog('Failed to release control: ' + (data && data.error));
+            }
+            return data;
+        } catch (e) { printLog('Error releasing control: '+e); }
+    }
+
+    // Expose globally for tab switcher
+    window.acquireControl = acquireControl;
+    window.releaseControl = releaseControl;
+
+    // Helper to ensure the control input is focused (useful for mobile soft keyboards)
+    function focusControlInput() {
+        try {
+            if (controlTextInput) {
+                controlTextInput.focus();
+                try { controlTextInput.setSelectionRange(controlTextInput.value.length, controlTextInput.value.length); } catch (e) {}
+            }
+        } catch (e) {}
+    }
+
+    if (controlAcquireBtn) {
+        controlAcquireBtn.addEventListener('click', async () => { await acquireControl(); focusControlInput(); });
+    }
+    if (controlReleaseBtn) {
+        controlReleaseBtn.addEventListener('click', async () => { await releaseControl(); focusControlInput(); });
+    }
+
+    const searchBtn = document.getElementById('SearchBtn');
+    if (searchBtn) {
+        searchBtn.addEventListener('click', () => {
+            try {
+                if (controlTextInput) {
+                    const ev = new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true });
+                    controlTextInput.dispatchEvent(ev);
+                }
+            } catch (e) {
+                // ignore dispatch failures
+            }
+            // refocus input so mobile keyboard stays open
+            focusControlInput();
+        });
+    }
+
+    // add eventlistener to button with id EscBtn
+    const escBtn = document.getElementById('EscBtn');
+    if (escBtn) {
+        escBtn.addEventListener('click', () => {
+            // Dispatch a synthetic keydown on the control input so the local handler
+            // updates searchMode / escaped state exactly as if Escape was pressed.
+            try {
+                if (controlTextInput) {
+                    const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+                    controlTextInput.dispatchEvent(ev);
+                }
+            } catch (e) {
+                // ignore dispatch failures
+            }
+            // refocus input so mobile keyboard stays open
+            focusControlInput();
+        });
+    }
+
+    // arrows (T layout)
+    const arrowsWrap = document.createElement('div'); arrowsWrap.className = 'kbd-row';
+    const arrowsGrid = document.createElement('div'); arrowsGrid.className = 'kbd-arrows';
+    const empty = () => { const d = document.createElement('div'); d.className='empty'; return d; };
+    arrowsGrid.appendChild(empty());
+    const up = document.createElement('button'); up.className='kbd-btn k-up'; up.textContent='↑'; up.addEventListener('click', ()=>{ fetch('/control/keystroke',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key:'ArrowUp'}), credentials:'include'}); focusControlInput(); });
+    arrowsGrid.appendChild(up);
+    arrowsGrid.appendChild(empty());
+    const left = document.createElement('button'); left.className='kbd-btn k-left'; left.textContent='←'; left.addEventListener('click', ()=>{ fetch('/control/keystroke',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key:'ArrowLeft'}), credentials:'include'}); focusControlInput(); });
+    arrowsGrid.appendChild(left);
+    const mid = document.createElement('div'); mid.className='empty'; arrowsGrid.appendChild(mid);
+    const right = document.createElement('button'); right.className='kbd-btn k-right'; right.textContent='→'; right.addEventListener('click', ()=>{ fetch('/control/keystroke',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key:'ArrowRight'}), credentials:'include'}); focusControlInput(); });
+    arrowsGrid.appendChild(right);
+    arrowsGrid.appendChild(empty());
+    const down = document.createElement('button'); down.className='kbd-btn k-down'; down.textContent='↓'; down.addEventListener('click', ()=>{ fetch('/control/keystroke',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key:'ArrowDown'}), credentials:'include'}); focusControlInput(); });
+    arrowsGrid.appendChild(down);
+    arrowsWrap.appendChild(arrowsGrid);
+    keyboardButtonsDiv.appendChild(arrowsWrap);
+
+    // Send keystrokes per keydown so the input remains responsive. Implement special "search mode" triggered by 'j'.
+    if (controlTextInput) {
+        let searchMode = false;    // true when we've entered the game's search/edit mode
+
+        // initialize lastLength so we can detect deletes from mobile IME which sometimes report e.key="Process"
+        controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
+        controlTextInput.addEventListener('input', () => {
+                controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
+        });
+
+        controlTextInput.addEventListener('keydown', (e) => {
+            // Handle entering search mode: when not in search mode and user types 'j',
+            // send the 'j' key to the game (which opens search in-game) but prevent the
+            // 'j' character from being inserted into the web input. Subsequent typing
+            // while in searchMode should appear in the input and be sent to the game.
+            let rawKey = (e.key || '').toString();
+            let rawLower = rawKey.toLowerCase();
+
+            if (rawLower == 'f3') {
+              e.preventDefault();
+              if (!searchMode) {
+                rawKey = 'J';
+                rawLower = 'j';
+              }
+              else {
+                return;
+              }
+            }
+            
+
+            // check if last character in content was removed, if so, rawKey/rawLower was backspace although the keyboard did not send it as such
+            if (searchMode && rawLower === 'process' || e.keyCode === 229) {
+                rawKey = 'backspace';
+                rawLower = 'backspace';
+            }
+
+            if (!searchMode && rawLower === 'j') {
+                // send 'j' to the game, but prevent it from appearing in the input
+                e.preventDefault();
+                const k = 'j';
+                fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: k}), credentials:'include'})
+                    .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
+                    .catch(err=>printLog('Keystroke network error: '+err));
+                searchMode = true;
+                // focus and keep input as-is for typing search text
+                return;
+            }
+
+            // While in search mode, Enter or Escape have special behavior
+            if (searchMode) {
+                if (rawLower === 'enter' || rawLower === 'return') {
+                    // send Enter to game and exit search mode (keep content)
+                    e.preventDefault();
+                    fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: 'Enter'}), credentials:'include'})
+                        .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
+                        .catch(err=>printLog('Keystroke network error: '+err));
+                    searchMode = false;
+                    return;
+                }
+                if (rawLower === 'escape' || rawLower === 'esc') {
+                    // first Escape: exit search mode but keep typed content
+                    e.preventDefault();
+                    fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: 'Escape'}), credentials:'include'})
+                        .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
+                        .catch(err=>printLog('Keystroke network error: '+err));
+                    searchMode = false;
+                    return;
+                }
+                // Otherwise allow printable chars to appear and send them as keystrokes below.
+            }
+
+            // Default per-key sending: printable characters and a few control keys
+            const allowed = ['Enter','Backspace','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'];
+            // Normalize mobile variants like 'backspace' or 'delete'
+            let keyToSend = null;
+            if (rawKey === ' ') {
+                keyToSend = 'Space';
+            } else if (rawKey.length === 1) {
+                keyToSend = rawKey;
+            } else if (rawLower === 'backspace' || rawLower === 'delete') {
+                keyToSend = 'Backspace';
+            } else if (rawLower === 'enter' || rawLower === 'return') {
+                keyToSend = 'Enter';
+            } else if (rawLower === 'escape' || rawLower === 'esc') {
+                keyToSend = 'Escape';
+            } else if (rawLower.startsWith('arrow')) {
+                // keep ArrowLeft/ArrowRight etc
+                keyToSend = rawKey;
+            }
+
+            if ((searchMode == true && keyToSend === 'Backspace') || keyToSend != 'Backspace') {
+                fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: keyToSend}), credentials:'include'})
+                    .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
+                    .catch(err=>printLog('Keystroke network error: '+err));
+            }
+        });
+
+        // If a paste occurs (multiple chars inserted), send the full text once.
+        controlTextInput.addEventListener('paste', (ev) => {
+            // let the paste complete and then send text
+            setTimeout(async () => {
+                const txt = controlTextInput.value || '';
+                try {
+                    const res = await fetch('/control/text', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text: txt}), credentials:'include'});
+                    const data = await res.json();
+                    if (!data || !data.success) printLog('Send text failed: ' + (data && data.error));
+                } catch (err) { printLog('Send text error: '+err); }
+            }, 50);
+        });
+    }
+
+    // Poll control status every 2s
+    fetchControlStatus();
+    setInterval(fetchControlStatus, 2000);
+
+    // Release control on unload if we are the owner
+    window.addEventListener('beforeunload', () => {
+        try { window.releaseControl && window.releaseControl(); } catch(e){}
+    });
+
+});
