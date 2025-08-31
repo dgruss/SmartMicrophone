@@ -504,6 +504,11 @@ def rooms_join():
             notify_rooms_update()
         except Exception:
             pass
+        # Update external config.ini player list
+        try:
+            update_config_players()
+        except Exception:
+            pass
         logger.info('Session %s joined room %s as %s', sid, room, username)
         return jsonify({'success': True, 'room': room, 'name': username, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
     except Exception as e:
@@ -541,17 +546,98 @@ def rooms_leave():
                 del SESSION_USERNAMES[sid]
             except Exception:
                 pass
+    except Exception as e:
+        logger.exception('Failed to leave room: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+def update_config_players():
+    """Update ../../usdx/config.ini P1..P6 and [Game] Players based on ROOMS.
+
+    Rules:
+    - For mic1..mic6, merge multiple names with ' & '. If empty, write 'None'.
+    - Players value in [Game] is: 1 if no players, 1-4 if player count in that range,
+      or 6 if 5 or more players.
+    """
+    try:
+        base_dir = os.path.dirname(__file__)
+        cfg_path = os.path.realpath(os.path.join(base_dir, '../../usdx/config.ini'))
+        if not os.path.exists(cfg_path):
+            logger.warning('Config path not found: %s', cfg_path)
+            return False
+
+        import configparser
+        cp = configparser.ConfigParser()
+        # preserve case for keys
+        cp.optionxform = str
+        with open(cfg_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            cp.read_file(fh)
+
+        # Ensure sections exist
+        if 'Name' not in cp:
+            cp.add_section('Name')
+        if 'Game' not in cp:
+            cp.add_section('Game')
+
+        # Build P1..P6 values from ROOMS
+        player_names = []
+        for i in range(1, 7):
+            room_key = f'mic{i}'
+            users = ROOMS.get(room_key, [])
+            if users:
+                # merge multiple players in a single mic with ' & '
+                merged = ' & '.join(users)
+                player_names.append(merged)
+            else:
+                player_names.append('None')
+
+        # Write P1..P6
+        for i, name in enumerate(player_names, start=1):
+            cp['Name'][f'P{i}'] = name
+
+        # Player count is determined by the highest mic index in use:
+        # Mic 1 -> 1, Mic 2 -> 2, Mic 3 -> 3, Mic 4 -> 4, Mic 5 -> 6, Mic 6 -> 6
+        highest = 0
+        for idx, pname in enumerate(player_names, start=1):
+            if pname != 'None':
+                highest = idx
+
+        if highest == 0:
+            # no players -> default to 1
+            players_value = '1'
+        elif 1 <= highest <= 4:
+            players_value = str(highest)
+        else:
+            # highest is 5 or 6 -> set to 6
+            players_value = '6'
+
+        cp['Game']['Players'] = players_value
+
+        # Write atomically to avoid corruption
+        tmp_path = cfg_path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            cp.write(fh)
+        os.replace(tmp_path, cfg_path)
+        logger.info('Updated config.ini players: P1..P6=%s Players=%s', player_names, players_value)
+        return True
+    except Exception as e:
+        logger.exception('Failed to update config.ini players: %s', e)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return False
 
         logger.info('User %s left all rooms', username)
         try:
             notify_rooms_update()
         except Exception:
             pass
+        try:
+            update_config_players()
+        except Exception:
+            pass
         return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
-    except Exception as e:
-        logger.exception('Failed to leave room: %s', e)
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/songs/search', methods=['GET'])
 def songs_search():
