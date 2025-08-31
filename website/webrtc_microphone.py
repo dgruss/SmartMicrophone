@@ -59,17 +59,17 @@ class WebRTCMicrophone:
                     '--sink', f'smartphone-mic-{self.index}-sink',
                     '--mode', 'lowdelay',
                     '--rate', '48000',
-                    '--pulse-buf', '5ms',
-                    '--sink-frame', '5ms',
-                    '--jitter-buf', '5ms',
-                    '--max-drift', '5ms',
+                    '--pulse-buf', '20ms',
+                    '--sink-frame', '20ms',
+                    '--jitter-buf', '20ms',
+                    '--max-drift', '0ms',
                     '--chans', '2'
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1
+                bufsize=2
             )
 
         time.sleep(0.1)
@@ -129,7 +129,8 @@ class WebRTCMicrophone:
                 lines.append(line.strip())
                 logger.error(line, end='')  # print the line to console
 
-            return {'success': False, 'error': f'WebRTC process failed to start:\n {''.join(answer_lines)}'}
+            answer_lines = lines
+            return {'success': False, 'error': f"WebRTC process failed to start:\n {''.join(answer_lines)}"}
 
         return {'success': True}
 
