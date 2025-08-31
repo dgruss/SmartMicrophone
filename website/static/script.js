@@ -45,6 +45,269 @@ document.addEventListener('DOMContentLoaded', function() {
     if (tabSettings) tabSettings.onclick = () => setActiveTab(tabSettings);
     setActiveTab(tabMic);
 });
+
+// Songs UI logic
+document.addEventListener('DOMContentLoaded', function() {
+    const songsPanel = document.getElementById('songsPanel');
+    const tabSongs = document.getElementById('tabSongs');
+    const songSearchInput = document.getElementById('songSearchInput');
+    const songSearchBtn = document.getElementById('songSearchBtn');
+    const songClearBtn = document.getElementById('songClearBtn');
+    const songResults = document.getElementById('songResults');
+    const songPreview = document.getElementById('songPreview');
+    // Shared audio player state so only one preview plays at a time
+    let currentAudio = null;
+    let currentPlayingId = null;
+    let currentPlayButton = null;
+
+    // stop and fully cleanup the current audio and its UI
+    function stopCurrentAudio() {
+        try {
+            if (window._currentAudio) {
+                const a = window._currentAudio;
+                // remove bound handlers
+                try { if (a._boundTimeUpdate) a.removeEventListener('timeupdate', a._boundTimeUpdate); } catch(e){}
+                try { if (a._boundEnded) a.removeEventListener('ended', a._boundEnded); } catch(e){}
+                try { if (a._boundError) a.removeEventListener('error', a._boundError); } catch(e){}
+                try { if (a._boundLoadedMetadata) a.removeEventListener('loadedmetadata', a._boundLoadedMetadata); } catch(e){}
+                try { a.pause(); } catch(e){}
+                try { a.src = ''; } catch(e){}
+                try { delete a._boundTimeUpdate; } catch(e){}
+                try { delete a._boundEnded; } catch(e){}
+                try { delete a._boundError; } catch(e){}
+                try { delete a._boundLoadedMetadata; } catch(e){}
+            }
+        } catch(e) {
+            // ignore
+        }
+        // clear UI
+        try { if (window._currentPlayButton) window._currentPlayButton.textContent = '▶'; } catch(e){}
+        try { if (window._currentSlider) { window._currentSlider.style.display = 'none'; window._currentSlider.max = 0; window._currentSlider.value = 0; window._currentSlider.oninput = null; } } catch(e){}
+        try { if (window._currentTimeLabel) window._currentTimeLabel.textContent = '0:00'; } catch(e){}
+        try { if (window._currentDurationLabel) window._currentDurationLabel.textContent = ''; } catch(e){}
+        // unset globals
+        try { window._currentAudio = null; } catch(e){}
+        try { window._currentSlider = null; } catch(e){}
+        try { window._currentTimeLabel = null; } catch(e){}
+        try { window._currentDurationLabel = null; } catch(e){}
+        try { window._currentPlayButton = null; } catch(e){}
+        currentAudio = null;
+        currentPlayButton = null;
+        currentPlayingId = null;
+    }
+
+    function renderResults(items) {
+        songResults.innerHTML = '';
+        if (!items || items.length === 0) {
+            songResults.textContent = 'No songs found';
+            return;
+        }
+        items.forEach(it => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.justifyContent = 'space-between';
+            row.style.alignItems = 'center';
+            row.style.padding = '6px 8px';
+            row.style.borderBottom = '1px solid #f0f0f0';
+
+            const title = document.createElement('div');
+            title.textContent = it.display;
+            title.style.flex = '1';
+
+            const actions = document.createElement('div');
+            actions.style.flex = '0 0 auto';
+            actions.style.display = 'flex';
+            actions.style.gap = '8px';
+
+            // small play/pause control per-row + position slider
+            const previewBtn = document.createElement('button');
+            previewBtn.textContent = '▶';
+            previewBtn.title = 'Preview';
+            previewBtn.style.width = '52px';
+            previewBtn.style.height = '28px';
+            previewBtn.style.padding = '2px 6px';
+
+            // position slider and time labels
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = 0;
+            slider.max = 0;
+            slider.value = 0;
+            slider.style.width = '220px';
+            slider.style.display = 'none';
+            slider.title = 'Seek';
+
+            const timeLabel = document.createElement('span');
+            timeLabel.textContent = '0:00';
+            timeLabel.style.marginLeft = '8px';
+            timeLabel.style.fontSize = '0.9em';
+            timeLabel.style.color = '#444';
+
+            const durationLabel = document.createElement('span');
+            durationLabel.textContent = '';
+            durationLabel.style.marginLeft = '6px';
+            durationLabel.style.fontSize = '0.9em';
+            durationLabel.style.color = '#666';
+
+            // helper to format seconds -> M:SS
+            function fmt(t) {
+                if (!isFinite(t) || t < 0) return '0:00';
+                const m = Math.floor(t / 60);
+                const s = Math.floor(t % 60).toString().padStart(2, '0');
+                return m + ':' + s;
+            }
+
+            // Keep references to the slider/time for the currently playing audio
+            let boundTimeUpdate = null;
+
+            previewBtn.onclick = () => {
+                // Use server-side id mapping for preview to avoid exposing file paths
+                if (!it.id) {
+                    printLog('Preview id missing for item: ' + JSON.stringify(it));
+                    return;
+                }
+                const url = '/songs/preview?id=' + encodeURIComponent(it.id);
+                // If this row is already playing, stop it
+                if (currentPlayingId === it.id) {
+                    stopCurrentAudio();
+                    return;
+                }
+
+                // Stop previous audio if any and clear its UI
+                if (currentAudio || window._currentAudio) {
+                    stopCurrentAudio();
+                }
+
+                // Create new Audio and play
+                currentAudio = new Audio(url);
+                // store globals so other rows can clear them
+                window._currentAudio = currentAudio;
+                window._currentSlider = slider;
+                window._currentTimeLabel = timeLabel;
+                window._currentDurationLabel = durationLabel;
+                window._currentPlayButton = previewBtn;
+
+                currentPlayingId = it.id;
+                currentPlayButton = previewBtn;
+                previewBtn.textContent = '⏸';
+
+                // show slider
+                slider.style.display = 'inline-block';
+
+                // when metadata loads, set slider max and duration
+                const onLoaded = () => {
+                    try {
+                        const dur = isFinite(currentAudio.duration) ? Math.floor(currentAudio.duration) : 0;
+                        slider.max = dur;
+                        durationLabel.textContent = fmt(dur);
+                    } catch (e) {}
+                };
+                currentAudio._boundLoadedMetadata = onLoaded;
+                currentAudio.addEventListener('loadedmetadata', onLoaded);
+
+                // timeupdate updates slider
+                boundTimeUpdate = () => {
+                    try {
+                        const t = Math.floor(currentAudio.currentTime || 0);
+                        slider.value = t;
+                        timeLabel.textContent = fmt(t);
+                    } catch (e) {}
+                };
+                currentAudio._boundTimeUpdate = boundTimeUpdate;
+                currentAudio.addEventListener('timeupdate', boundTimeUpdate);
+
+                const onEnded = () => { stopCurrentAudio(); };
+                currentAudio._boundEnded = onEnded;
+                currentAudio.addEventListener('ended', onEnded);
+
+                const onError = (ev) => {
+                    printLog('Preview error for ' + (it.mp3 || it.display || it.id));
+                    stopCurrentAudio();
+                };
+                currentAudio._boundError = onError;
+                currentAudio.addEventListener('error', onError);
+
+                // seeking via slider
+                slider.oninput = (ev) => {
+                    if (currentAudio && slider.max > 0) {
+                        try { currentAudio.currentTime = Number(slider.value); } catch(e) {}
+                    }
+                };
+
+                currentAudio.play().catch(err => {
+                    printLog('Preview play failed: ' + err);
+                    stopCurrentAudio();
+                });
+            };
+
+            const addBtn = document.createElement('button');
+            addBtn.textContent = it.upl ? 'Remove' : 'Add';
+            addBtn.style.minWidth = '64px';
+            addBtn.onclick = () => {
+                if (!it.id) { printLog('Cannot modify upl: missing id'); return; }
+                const action = it.upl ? 'remove' : 'add';
+                addBtn.disabled = true;
+                fetch('/songs/add_to_upl', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: it.id, action: action}),
+                    credentials: 'include'
+                }).then(r=>r.json()).then(data=>{
+                    addBtn.disabled = false;
+                    if (data && data.success) {
+                        it.upl = !!data.upl;
+                        addBtn.textContent = it.upl ? 'Remove' : 'Add';
+                        printLog((it.upl ? 'Added' : 'Removed') + ' from upl: ' + (data.line || it.display));
+                    } else {
+                        printLog('Failed to modify upl: ' + (data && data.error ? data.error : 'unknown'));
+                    }
+                }).catch(e=>{ addBtn.disabled = false; printLog('Network error modifying upl: '+e); });
+            };
+
+            // place preview button, slider, time and add button together
+            const previewContainer = document.createElement('div');
+            previewContainer.style.display = 'flex';
+            previewContainer.style.alignItems = 'center';
+            previewContainer.style.gap = '8px';
+            previewContainer.appendChild(previewBtn);
+            previewContainer.appendChild(slider);
+            previewContainer.appendChild(timeLabel);
+            previewContainer.appendChild(durationLabel);
+
+            actions.appendChild(previewContainer);
+            actions.appendChild(addBtn);
+            row.appendChild(title);
+            row.appendChild(actions);
+            songResults.appendChild(row);
+        });
+    }
+
+    function searchSongs(q) {
+        songResults.textContent = 'Searching...';
+        fetch('/songs/search?q=' + encodeURIComponent(q) + '&per_page=100')
+            .then(r=>r.json()).then(data=>{
+                if (data.success) renderResults(data.items);
+                else songResults.textContent = 'Search failed';
+            }).catch(e=>{ songResults.textContent = 'Network error'; printLog('Search error: '+e); });
+    }
+
+    if (songSearchBtn) songSearchBtn.onclick = () => searchSongs(songSearchInput.value.trim());
+    if (songClearBtn) songClearBtn.onclick = () => { songSearchInput.value=''; songResults.innerHTML=''; songPreview.style.display='none'; };
+    // allow pressing Enter in the search input to trigger search
+    if (songSearchInput) {
+        songSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                if (songSearchBtn) songSearchBtn.click();
+            }
+        });
+    }
+
+    // When Songs tab is activated, ensure panel shows
+    if (tabSongs) tabSongs.addEventListener('click', () => {
+        if (songsPanel) songsPanel.style.display = 'flex';
+    });
+});
 // other globals
 startButton = undefined
 pc = undefined
@@ -54,7 +317,7 @@ remoteControlUser = undefined
 
 const MICROPHONE_COLORS = [
     '#3357FF',  // Blue
-    '#FF5733',  // Red
+    '#FF3434',  // Red
     '#33FF57',  // Green
     '#FFA133',  // Orange
     '#FF33A1',  // Pink
@@ -135,6 +398,15 @@ document.addEventListener('DOMContentLoaded', function() {
         };
     } else {
         printLog('Warning: saveNameBtn not found');
+    }
+    // allow pressing Enter in the name input to save
+    if (userNameInput) {
+        userNameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                if (saveNameBtn) saveNameBtn.click();
+            }
+        });
     }
 
     // Box click logic

@@ -137,6 +137,19 @@
     </div>
   </div>
 
+  <!-- Songs panel -->
+  <div id="songsPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:100vh; width:100vw; margin-top:54px; padding:18px; box-sizing:border-box;">
+    <h2>Songs</h2>
+    <div style="max-width:680px; width:100%;">
+      <input id="songSearchInput" type="text" placeholder="Search songs (artist or title)" style="width:100%; padding:10px; font-size:1em; border-radius:8px; border:1px solid #ddd;">
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <button id="songSearchBtn" type="submit" style="flex:0 0 120px;">Search</button>
+      </div>
+      <div id="songResults" style="margin-top:12px; max-height:60vh; overflow:auto; background:#fff; border:1px solid #eee; border-radius:8px; padding:8px;"></div>
+    </div>
+    <audio id="songPreview" controls style="margin-top:12px; width:100%; max-width:680px; display:none;"></audio>
+  </div>
+
   <style>
     body {
       font-family: 'Inter', Arial, sans-serif;
@@ -164,7 +177,7 @@
     }
     /* per-microphone color variables */
     #box-mic1 { --color: #3357FF; --light: rgba(51,87,255,0.18); --text-color: #3357FF; }
-    #box-mic2 { --color: #FF5733; --light: rgba(255,87,51,0.18); --text-color: #FF5733; }
+    #box-mic2 { --color: #FF3434; --light: rgba(255,87,51,0.18); --text-color: #FF3434; }
     #box-mic3 { --color: #33FF57; --light: rgba(51,255,87,0.18); --text-color: #33AA57; }
     #box-mic4 { --color: #FFA133; --light: rgba(255,161,51,0.18); --text-color: #CC7A12; }
     #box-mic5 { --color: #FFFF33; --light: rgba(255,255,51,0.18); --text-color: #666666; --occupied-text: #333333; }

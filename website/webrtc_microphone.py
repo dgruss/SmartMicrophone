@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 MICROPHONE_COLORS = [
     '#3357FF',  # Blue
-    '#FF5733',  # Red
+    "#FF3434",  # Red
     '#33FF57',  # Green
     '#FFA133',  # Orange
     '#FF33A1',  # Pink
