@@ -92,6 +92,15 @@ document.addEventListener('DOMContentLoaded', function() {
     showTab(tabMic);
 });
 
+window.addEventListener('beforeunload', function (e) {
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/disconnect');
+  } else {
+    // Fallback for older browsers
+    fetch('/api/disconnect', {method: 'POST', keepalive: true});
+  }
+});
+
 // Songs UI logic
 document.addEventListener('DOMContentLoaded', function() {
     const songsPanel = document.getElementById('songsPanel');
@@ -375,6 +384,14 @@ document.addEventListener('DOMContentLoaded', function() {
         nameEntry.style.display = 'none';
         mainLobby.style.display = 'flex';
         joinLobby(); // Ensure name is added to lobby on load
+        // Start WebRTC session for this client (capture mic, send offer to server)
+        try {
+            if (!window.smartMicPC) {
+                startWebRTCSession().catch(e => printLog('WebRTC start failed: ' + e));
+            }
+        } catch (e) {
+            printLog('Error starting WebRTC: ' + e);
+        }
     } else {
         nameEntry.style.display = 'flex';
         mainLobby.style.display = 'none';
@@ -606,6 +623,70 @@ document.addEventListener('DOMContentLoaded', function() {
     refreshRoomsFromServer();
     setInterval(refreshRoomsFromServer, 2000);
 
+    // Start a WebRTC session with the server: create RTCPeerConnection, capture local mic,
+    // send SDP offer to server (/api?action=start_webrtc) and apply returned SDP answer.
+    async function startWebRTCSession() {
+        printLog('Starting WebRTC session...');
+        const pc = new RTCPeerConnection();
+        window.smartMicPC = pc;
+
+        // Send local ICE candidates to server if needed (server-side webrtc-cli may not need them)
+        pc.onicecandidate = (ev) => {
+            // we do not currently send candidates to server; server's webrtc-cli is expected to be
+            // the offer/answer terminator. If needed, implement trickle ICE here.
+            if (!ev.candidate) return;
+            printLog('Local ICE candidate: ' + JSON.stringify(ev.candidate));
+        };
+
+        // Optionally attach remote tracks to an <audio> element for monitoring
+        pc.ontrack = (ev) => {
+            printLog('Received remote track');
+            let au = document.getElementById('remoteMonitor');
+            if (!au) {
+                au = document.createElement('audio');
+                au.id = 'remoteMonitor';
+                au.autoplay = true;
+                au.controls = true;
+                au.style.position = 'fixed';
+                au.style.bottom = '10px';
+                au.style.right = '10px';
+                au.style.zIndex = 9999;
+                document.body.appendChild(au);
+            }
+            au.srcObject = ev.streams && ev.streams[0] ? ev.streams[0] : new MediaStream(ev.track ? [ev.track] : []);
+        };
+
+        // Get local microphone and add to PeerConnection
+        try {
+            const localStream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+            localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        } catch (e) {
+            printLog('getUserMedia failed: ' + e);
+            // proceed without local audio if permission denied
+        }
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // send offer to server
+        const form = new FormData();
+        form.append('action', 'start_webrtc');
+        form.append('offer', offer.sdp);
+
+        const res = await fetch('/api', {method: 'POST', body: form, credentials: 'include'});
+        const data = await res.json();
+        if (!data || !data.success) {
+            throw new Error(data && data.error ? data.error : 'Failed to start webrtc on server');
+        }
+        const answerSDP = data.answer;
+        if (!answerSDP) throw new Error('No SDP answer from server');
+
+        const answer = {type: 'answer', sdp: answerSDP};
+        await pc.setRemoteDescription(answer);
+        printLog('WebRTC session started successfully');
+        return pc;
+    }
+
     // Try real-time updates via Server-Sent Events. If SSE is available on the
     // server, this will push immediate room updates; polling remains as a
     // fallback.
@@ -786,7 +867,7 @@ async function createOffer() {
         }
     })
     .catch(error => {
-        printLog('Network error: ' + error.message)
+        printLog('network error: ' + error.message)
         setStatus('Error starting microphone: ' + data.error);
     })
 }
@@ -1012,11 +1093,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // initialize lastLength so we can detect deletes from mobile IME which sometimes report e.key="Process"
         controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
-        controlTextInput.addEventListener('input', () => {
-                controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
-        });
+          controlTextInput.addEventListener('input', () => {
+                  controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
+          });
 
-        controlTextInput.addEventListener('keydown', (e) => {
+          controlTextInput.addEventListener('keydown', (e) => {
             // Handle entering search mode: when not in search mode and user types 'j',
             // send the 'j' key to the game (which opens search in-game) but prevent the
             // 'j' character from being inserted into the web input. Subsequent typing

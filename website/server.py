@@ -99,15 +99,21 @@ def rooms_stream():
 @app.before_request
 def log_incoming_request():
     try:
-        logger.info('Incoming request: %s %s args=%s', request.method, request.path, dict(request.args))
+        if not request.path in ['/rooms', '/control/status']:
+            logger.info('Incoming request: %s %s args=%s', request.method, request.path, dict(request.args))
     except Exception:
         pass
 
 @app.route('/', methods=['GET']) # index route
 def index():
     global automatically_reconnect
-    
     automatically_reconnect = False
+
+    # On first visit, ensure session id
+    player_id = session.get('session_id', None)
+    if not player_id:
+        player_id = random.randint(0, 9999999)
+        session['session_id'] = player_id
 
     # maybe this person just reloaded but still has a microphone running
     if 'session_id' in session and is_youngest_session():
@@ -118,6 +124,18 @@ def index():
             automatically_reconnect = True
 
     return render_template('index.html')
+@app.route('/api/disconnect', methods=['POST'])
+def api_disconnect():
+    # Called from JS on page close/unload to clean up the player's source
+    player_id = session.get('session_id', None)
+    if player_id:
+        mgr = WebRTCMicrophoneManager()
+        mgr.remove_microphone(player_id)
+        session.pop('microphone_index', None)
+        session.pop('microphone_start_timestamp', None)
+        session.pop('session_id', None)
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': 'No session'})
 
 
 @app.route('/api', methods=['POST'])
@@ -126,52 +144,40 @@ def api():
     action = request.form.get('action')
     logger.info(f'Received action: {action}')
 
-    if action == 'start_microphone':
+    if action == 'start_webrtc':
+        # Start per-player webrtc-cli using the provided SDP offer
         offer = request.form.get('offer')
-        mic_index = int(request.form.get('index', -1))
+        if not offer:
+            return jsonify({'success': False, 'error': 'Missing offer'})
+        player_id = session.get('session_id')
+        if not player_id:
+            player_id = random.randint(0, 9999999)
+            session['session_id'] = player_id
 
-        if mic_index < 0 or mic_index >= len(microphone_assignments):
-            return jsonify({'success': False, 'error': 'Invalid microphone index'})
+        mgr = WebRTCMicrophoneManager()
+        start_res = mgr.start_microphone(player_id, offer)
+        if not start_res.get('success'):
+            return jsonify({'success': False, 'error': start_res.get('error', 'Failed to start webrtc')})
 
-        # Assign microphone to this session
-        if microphone_assignments[mic_index] is None or microphone_assignments[mic_index] == session.get('session_id'):
-            response = WebRTCMicrophoneManager().start_microphone(offer, mic_index)
-            if response.get('success'):
-                session['microphone_index'] = mic_index
-                session['microphone_start_timestamp'] = time.time()
-                session['session_id'] = session.get('session_id', random.randint(0, 9999999))
-                sessions[session['session_id']] = {
-                    'microphone_index': mic_index,
-                    'microphone_start_timestamp': session['microphone_start_timestamp']
-                }
-                microphone_assignments[mic_index] = session['session_id']
-                response['assignments'] = get_mic_assignments()
-            return jsonify(response)
-        else:
-            return jsonify({'success': False, 'error': 'Microphone already in use'})
+        # connect monitor to current sink (default lobby)
+        sink_index = session.get('microphone_index', 0)
+        try:
+            mgr.connect_microphone_to_sink(player_id, sink_index)
+        except Exception:
+            pass
 
-    elif action == 'stop_microphone':
-        mic_index = session.get('microphone_index', -1)
-        if 'session_id' in session and is_youngest_session():
-            response = WebRTCMicrophoneManager().stop_microphone(mic_index)
-            if response.get('success'):
-                session.pop('microphone_index', None)
-                session.pop('microphone_start_timestamp', None)
-                session.pop('session_id', None)
-                if mic_index >= 0 and mic_index < len(microphone_assignments):
-                    microphone_assignments[mic_index] = None
-            response['assignments'] = get_mic_assignments()
-            return jsonify(response)
-        return jsonify({'success': False, 'error': 'Invalid session'})
+        # record session info
+        session['microphone_index'] = sink_index
+        session['microphone_start_timestamp'] = time.time()
+        sessions[player_id] = {
+            'microphone_index': sink_index,
+            'microphone_start_timestamp': session['microphone_start_timestamp']
+        }
 
-    elif action == 'select_microphone':
-        mic_index = int(request.form.get('index', -1))
-        if mic_index < 0 or mic_index >= len(microphone_assignments):
-            return jsonify({'success': False, 'error': 'Invalid microphone index'})
-        session['microphone_index'] = mic_index
-        return jsonify({'success': True, 'assignments': get_mic_assignments()})
+        return jsonify({'success': True, 'answer': start_res.get('answer'), 'player_id': player_id})
 
-    elif action == 'get_assignments':
+
+    if action == 'get_assignments':
         return jsonify({'success': True, 'assignments': get_mic_assignments()})
 
     elif action == 'remote_text':
@@ -499,6 +505,24 @@ def rooms_join():
 
         # Add to target room
         ROOMS[room].append(username)
+
+        # Connect the player's source to the correct sink if their microphone is running
+        mgr = WebRTCMicrophoneManager()
+        # Map room name to sink index: 'lobby' -> 0, 'mic1' -> 1, ...
+        sink_index = 0
+        if room.startswith('mic'):
+            try:
+                sink_index = int(room[3:])
+            except Exception:
+                sink_index = 0
+        # Only attempt to connect if a microphone/process exists for this session
+        try:
+            if sid in mgr.microphones:
+                mgr.connect_microphone_to_sink(sid, sink_index)
+        except Exception:
+            logger.exception('Failed to connect microphone for session %s to sink %s', sid, sink_index)
+            pass
+
         # Notify SSE listeners of update
         try:
             notify_rooms_update()
@@ -847,9 +871,9 @@ def signal_handler(signum, frame):
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.basicConfig(filename='virtual-microphone.log', level=logging.INFO)
+    logging.basicConfig(filename='virtual-microphone.log', level=logging.DEBUG)
 
-    WebRTCMicrophoneManager().init()
+    WebRTCMicrophoneManager()
 
     # Build/update song index at startup
     try:
