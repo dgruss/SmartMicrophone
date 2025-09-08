@@ -337,8 +337,17 @@
   </style>
   <!-- change name moved into Settings tab -->
 
-  <!-- Lock button and overlay -->
-  <button id="lockBtn" aria-label="Lock screen">Lock</button>
+  <!-- Bottom video (replaces previous lock button). Clicking requests fullscreen for the video -->
+  <video id="lockVideo"
+    playsinline
+    muted
+    loop
+    preload="auto"
+    src="data:video/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAG21kYXQAAAGzABAHAAABthADAowdbb9/AAAC6W1vb3YAAABsbXZoZAAAAAB8JbCAfCWwgAAAA+gAAAAAAAEAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAIVdHJhawAAAFx0a2hkAAAAD3wlsIB8JbCAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAIAAAACAAAAAABsW1kaWEAAAAgbWRoZAAAAAB8JbCAfCWwgAAAA+gAAAAAVcQAAAAAAC1oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAVmlkZW9IYW5kbGVyAAAAAVxtaW5mAAAAFHZtaGQAAAABAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAEcc3RibAAAALhzdHNkAAAAAAAAAAEAAACobXA0dgAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAIAAgASAAAAEgAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABj//wAAAFJlc2RzAAAAAANEAAEABDwgEQAAAAADDUAAAAAABS0AAAGwAQAAAbWJEwAAAQAAAAEgAMSNiB9FAEQBFGMAAAGyTGF2YzUyLjg3LjQGAQIAAAAYc3R0cwAAAAAAAAABAAAAAQAAAAAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAFHN0c3oAAAAAAAAAEwAAAAEAAAAUc3RjbwAAAAAAAAABAAAALAAAAGB1ZHRhAAAAWG1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAAK2lsc3QAAAAjqXRvbwAAABtkYXRhAAAAAQAAAABMYXZmNTIuNzguMw=="
+    style="position: fixed; bottom: 12px; width: calc(100vw - 24px); left: 12px; right: 12px; z-index: 99999; background: #000; color: #fff; border: none; border-radius: 20px; padding: 0; box-shadow: 0 4px 14px rgba(0,0,0,0.4); cursor: pointer; font-weight: 600; height: 64px; object-fit: cover;">
+  </video>
+    <!-- Overlay label shown on top of the bottom video; pointer-events:none lets clicks reach the video controls -->
+    <div id="lockLabel" style="position: fixed; bottom: 12px; left: 12px; width: calc(100vw - 24px); height: 64px; z-index: 100000; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:18px; text-shadow:0 2px 6px rgba(0,0,0,0.6); pointer-events:none;">Lock Screen</div>
   <div id="lockOverlay" role="dialog" aria-hidden="true">
     <div id="lockInner">
       <div id="lockHint">Screen locked — drag the handle to unlock</div>

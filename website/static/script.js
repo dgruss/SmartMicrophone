@@ -1295,11 +1295,12 @@ document.addEventListener('DOMContentLoaded', function() {
 // Lock overlay behavior: drag-to-unlock
 document.addEventListener('DOMContentLoaded', function() {
     try {
-        const lockBtn = document.getElementById('lockBtn');
+    const lockBtn = document.getElementById('lockBtn');
         const lockOverlay = document.getElementById('lockOverlay');
         const unlockTrack = document.getElementById('unlockTrack');
         const unlockHandle = document.getElementById('unlockHandle');
-        if (!lockBtn || !lockOverlay || !unlockTrack || !unlockHandle) return;
+    // It's fine if lockBtn is missing because we replaced it with a video element.
+    if (!lockOverlay || !unlockTrack || !unlockHandle) return;
 
         let dragging = false;
         let startX = 0;
@@ -1381,5 +1382,37 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     } catch (e) {
         printLog('Lock UI initialization failed: ' + e);
+    }
+});
+
+// Bottom video behavior: attach provided base64 mp4 and make click request fullscreen
+document.addEventListener('DOMContentLoaded', function() {
+    try {
+        const video = document.getElementById('lockVideo');
+        if (!video) return;
+
+    // Attempt autoplay to prime playback; ignore rejections due to autoplay policies
+    try { video.muted = true; video.loop = true; video.playsInline = true; try { video.play().catch(()=>{}); } catch(e){} } catch (e) {}
+
+        // clicking the video requests fullscreen for the video element
+        video.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            try {
+                if (document.fullscreenElement === video) {
+                    return;
+                }
+            } catch (e) {}
+            const req = video.requestFullscreen || video.webkitRequestFullscreen || video.mozRequestFullScreen || video.msRequestFullscreen;
+            if (req) {
+                try { req.call(video); return; } catch (e) { console.warn('requestFullscreen failed', e); }
+            }
+            if (video.webkitEnterFullscreen) {
+                try { video.webkitEnterFullscreen(); return; } catch (e) { console.warn('webkitEnterFullscreen failed', e); }
+            }
+            try { await document.documentElement.requestFullscreen(); } catch (e) { console.warn('document.requestFullscreen fallback failed', e); }
+        }, { passive: true });
+
+    } catch (e) {
+        console.error('Lock video init failed:', e);
     }
 });
