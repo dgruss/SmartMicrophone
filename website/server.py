@@ -21,6 +21,8 @@ sessions = {}
 microphone_assignments = [None] * 6  # 6 microphones: Blue, Red, Green, Orange, Yellow, Pink
 remote_control_user = ""  # empty string means free
 remote_control_text = ""
+# Track last-seen timestamp for each session id (heartbeat from clients)
+LAST_SEEN = {}
 
 # Global rooms mapping: room name -> list of usernames
 ROOMS = {
@@ -35,6 +37,8 @@ ROOMS = {
 
 # Optional mapping of session id -> username for quick lookup
 SESSION_USERNAMES = {}
+# Optional mapping of session id -> preferred per-player delay (ms)
+SESSION_DELAYS = {}
 
 # SSE listeners will be set up after the Flask app is created to avoid
 # referencing `app` before initialization.
@@ -94,6 +98,21 @@ def rooms_stream():
                     pass
 
     return Response(stream_with_context(gen()), mimetype='text/event-stream')
+
+
+# Endpoint that merges rooms and control status and records a heartbeat
+@app.route('/status', methods=['GET'])
+def status():
+    try:
+        sid = session.get('session_id')
+        if sid:
+            LAST_SEEN[sid] = time.time()
+        # prepare payload with rooms and control status
+        payload = {'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'control': {'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME, 'timestamp': CONTROL_TIMESTAMP}}
+        return jsonify(payload)
+    except Exception as e:
+        logger.exception('Failed to serve /status: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.before_request
@@ -495,9 +514,19 @@ def rooms_join():
             sid = random.randint(1000000, 9999999)
             session['session_id'] = sid
 
-        # record username for session
+        # record username and optional delay for session
         username = str(name) if name else SESSION_USERNAMES.get(sid, f'user-{sid}')
         SESSION_USERNAMES[sid] = username
+        # allow the client to submit a per-player delay (ms)
+        try:
+            delay_val = data.get('delay')
+            if delay_val is not None:
+                try:
+                    SESSION_DELAYS[sid] = int(delay_val)
+                except Exception:
+                    SESSION_DELAYS[sid] = 0
+        except Exception:
+            pass
 
         # Remove from any other rooms first
         for r, users in ROOMS.items():
@@ -604,6 +633,7 @@ def update_config_players():
 
         # Build P1..P6 values from ROOMS
         player_names = []
+        player_delays = []
         for i in range(1, 7):
             room_key = f'mic{i}'
             users = ROOMS.get(room_key, [])
@@ -611,12 +641,34 @@ def update_config_players():
                 # merge multiple players in a single mic with ' & '
                 merged = ' & '.join(users)
                 player_names.append(merged)
+                # determine delay for first user in room (if we have a session mapping)
+                delay_ms = 0
+                try:
+                    first_user = users[0]
+                    # find a session id that maps to this username
+                    found_sid = None
+                    for sid_k, uname in SESSION_USERNAMES.items():
+                        if uname == first_user:
+                            found_sid = sid_k
+                            break
+                    if found_sid is not None:
+                        delay_ms = int(SESSION_DELAYS.get(found_sid, 0) or 0)
+                except Exception:
+                    delay_ms = 0
+                player_delays.append(str(delay_ms))
             else:
                 player_names.append('None')
+                player_delays.append('0')
 
         # Write P1..P6
         for i, name in enumerate(player_names, start=1):
             cp['Name'][f'P{i}'] = name
+
+        # Write Delays P1..P6 in [Delays]
+        if 'Delays' not in cp:
+            cp.add_section('Delays')
+        for i, d in enumerate(player_delays, start=1):
+            cp['Delays'][f'P{i}'] = str(d)
 
         # Player count is determined by the highest mic index in use:
         # Mic 1 -> 1, Mic 2 -> 2, Mic 3 -> 3, Mic 4 -> 4, Mic 5 -> 6, Mic 6 -> 6
@@ -874,6 +926,64 @@ if __name__ == '__main__':
     logging.basicConfig(filename='virtual-microphone.log', level=logging.DEBUG)
 
     WebRTCMicrophoneManager()
+
+    # Start background thread to clean up stale sessions that haven't polled /status
+    def stale_cleanup_loop():
+        mgr = WebRTCMicrophoneManager()
+        while True:
+            try:
+                now = time.time()
+                stale = []
+                for sid, last in list(LAST_SEEN.items()):
+                    if now - last > 10.0:
+                        stale.append(sid)
+                for sid in stale:
+                    try:
+                        logger.info('Stale session detected: %s, removing associated microphone', sid)
+                        mgr.remove_microphone(sid)
+                        # Remove from last-seen map
+                        LAST_SEEN.pop(sid, None)
+                        # Remove username from rooms if present
+                        try:
+                            uname = SESSION_USERNAMES.pop(sid, None)
+                            if uname:
+                                for r, users in list(ROOMS.items()):
+                                    if uname in users:
+                                        ROOMS[r] = [u for u in users if u != uname]
+                                try:
+                                    notify_rooms_update()
+                                except Exception:
+                                    logger.exception('Failed to notify rooms after stale removal')
+                                try:
+                                    update_config_players()
+                                except Exception:
+                                    logger.exception('Failed to update config players after stale removal')
+                        except Exception:
+                            logger.exception('Error removing user mapping for stale session %s', sid)
+                        # Release control ownership if this session held it
+                        try:
+                            global CONTROL_OWNER, CONTROL_OWNER_NAME, CONTROL_TIMESTAMP
+                            if CONTROL_OWNER == sid:
+                                CONTROL_OWNER = None
+                                CONTROL_OWNER_NAME = None
+                                CONTROL_TIMESTAMP = 0
+                                try:
+                                    notify_rooms_update()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            logger.exception('Error releasing control for stale session %s', sid)
+                    except Exception:
+                        logger.exception('Failed to remove stale microphone for session %s', sid)
+                time.sleep(2.0)
+            except Exception:
+                logger.exception('Exception in stale cleanup loop')
+
+    try:
+        t = threading.Thread(target=stale_cleanup_loop, daemon=True)
+        t.start()
+    except Exception:
+        logger.exception('Failed to start stale cleanup thread')
 
     # Build/update song index at startup
     try:

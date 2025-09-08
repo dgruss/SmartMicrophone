@@ -94,6 +94,69 @@
       border-radius: 4px;
     }
   </style>
+  <style>
+    /* Lock overlay styles */
+    #lockBtn {
+      position: fixed;
+      bottom: 12px;
+      width: calc(100vw - 24px);
+      left: 12px;
+      right: 12px;
+      z-index: 99999;
+      background: #111;
+      color: #fff;
+      border: none;
+      border-radius: 20px;
+      padding: 10px 14px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    #lockOverlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #000;
+      z-index: 100000;
+      display: none; /* shown when locked */
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      touch-action: none;
+    }
+    #lockInner {
+      width: 90%;
+      max-width: 720px;
+      height: 140px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+    }
+    #lockHint { font-size: 18px; color: rgba(255,255,255,0.85); }
+    #unlockTrack {
+      width: 80%;
+      height: 42px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 999px;
+      position: relative;
+      overflow: hidden;
+    }
+    #unlockHandle {
+      position: absolute;
+      left: 6px;
+      top: 6px;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.6);
+      touch-action: none;
+    }
+  </style>
   <script>
     var microphoneIndex = {{ session.get('microphone_index', 'undefined') }};
     var automaticallyReconnect = {{ 'true' if automatically_reconnect else 'false' }};
@@ -112,7 +175,7 @@
     <button id="saveNameBtn" style="font-size:1.5em; margin-top:1em;">Continue</button>
   </div>
 
-  <div id="mainLobby" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:100vh; width:100vw; margin-top:54px;">
+  <div id="mainLobby" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:50vh; width:100vw; margin-top:54px;">
   <div id="lobbyBox" class="lobbyBox" style="width:100%; max-width:480px; margin-bottom:18px; border-radius:18px; box-shadow:0 2px 12px rgba(0,0,0,0.08); background:#f5f5f5; padding:18px 0; text-align:center; font-size:1.3em; margin-top:18px;">
       <div style="font-weight:bold; margin-bottom:8px;">Lobby</div>
       <div id="lobbyNames" style="display:flex; flex-wrap:wrap; justify-content:center; gap:10px;"></div>
@@ -128,27 +191,49 @@
   </div>
 
   <!-- Settings panel (hidden by default) -->
-  <div id="settingsPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:100vh; width:100vw; margin-top:54px; padding:24px; box-sizing:border-box;">
+  <div id="settingsPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:50vh; width:100vw; margin-top:54px; padding:24px; box-sizing:border-box;">
+    <div style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <label><input type="checkbox" id="optNoiseSuppression"> Enable noise suppression</label>
+        <label><input type="checkbox" id="optEchoCancellation"> Enable echo cancellation</label>
+        <label><input type="checkbox" id="optAutoGain"> Enable auto gain control (AGC)</label>
+      </div>
+    </div>
+    <div style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
+      <h3>Player delay</h3>
+      <p style="font-size:0.9em; color:#555; margin-top:8px;">Configure your per-player delay with + (if you sing too early) / - (if you sing too late) to change in 10ms steps.</p>
+      <div style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+        <button id="delayMinus" style="width:40px; height:40px;">-</button>
+        <div id="delayDisplay" style="min-width:80px; text-align:center;">0 ms</div>
+        <button id="delayPlus" style="width:40px; height:40px;">+</button>
+      </div>
+    </div>
     <div style="max-width:480px; width:100%; text-align:left; margin-top:8px;">
-      <p style="color:#444;">Account</p>
       <button id="changeNameBtnSettings" style="width:auto; padding:10px 14px; background:#0070f3; color:#fff; border:none; border-radius:8px;">Change name</button>
     </div>
+
+      <!-- Debug output only available inside Settings -->
+      <div id="debugContainer" style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
+        <h3>Debug</h3>
+        <button id="toggleDebug" style="width:auto; padding:6px 10px; margin-bottom:8px;">Toggle Debug Output</button>
+        <textarea id="debugOutput" readonly style="width:100%; height:160px; display:none; background:#fff; border:1px solid #ccc; border-radius:4px; padding:8px; font-family:monospace;"></textarea>
+      </div>
   </div>
 
   <!-- Songs panel -->
-  <div id="songsPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:100vh; width:100vw; margin-top:54px; padding:18px; box-sizing:border-box;">
+  <div id="songsPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:50vh; width:100vw; margin-top:54px; padding:18px; box-sizing:border-box;">
     <div style="max-width:680px; width:100%;">
       <input id="songSearchInput" type="text" placeholder="Search songs (artist or title)" style="width:100%; padding:10px; font-size:1em; border-radius:8px; border:1px solid #ddd;">
       <div style="display:flex; gap:8px; margin-top:8px;">
         <button id="songSearchBtn" type="submit" style="flex:0 0 120px;">Search</button>
       </div>
-      <div id="songResults" style="margin-top:12px; max-height:60vh; overflow:auto; background:#fff; border:1px solid #eee; border-radius:8px; padding:8px;"></div>
+      <div id="songResults" style="margin-top:12px; max-height:50vh; overflow:auto; background:#fff; border:1px solid #eee; border-radius:8px; padding:8px;"></div>
     </div>
     <audio id="songPreview" controls style="margin-top:12px; width:100%; max-width:680px; display:none;"></audio>
   </div>
 
   <!-- Control panel -->
-  <div id="controlPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:100vh; width:100vw; margin-top:54px; padding:18px; box-sizing:border-box;">
+  <div id="controlPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:50vh; width:100vw; margin-top:54px; padding:18px; box-sizing:border-box;">
     <div style="max-width:680px; width:100%; text-align:center;">
       <div style="display:flex; gap:8px; justify-content:center; margin-bottom:12px;">
         <div id="controlOwner" style="margin-bottom:12px; color:#333; font-weight:600;">Control: free</div>
@@ -172,7 +257,7 @@
       background: #f8f9fa;
       margin: 0;
       padding: 0;
-      min-height: 100vh;
+      min-height: 80vh;
     }
     .micBox {
       display: flex;
@@ -252,16 +337,16 @@
   </style>
   <!-- change name moved into Settings tab -->
 
-  <div id="debugContainer">
-  <button id="toggleDebug">Toggle Debug Output</button>
-  <textarea id="debugOutput" readonly></textarea>
-  <script>
-    const toggleDebug = document.getElementById('toggleDebug');
-    const debugOutput = document.getElementById('debugOutput');
-    toggleDebug.onclick = () => {
-      debugOutput.style.display = (debugOutput.style.display === 'none' || debugOutput.style.display === '') ? 'block' : 'none';
-    };
-  </script>
+  <!-- Lock button and overlay -->
+  <button id="lockBtn" aria-label="Lock screen">Lock</button>
+  <div id="lockOverlay" role="dialog" aria-hidden="true">
+    <div id="lockInner">
+      <div id="lockHint">Screen locked — drag the handle to unlock</div>
+      <div id="unlockTrack">
+        <div id="unlockHandle" draggable="false"></div>
+      </div>
+    </div>
+  
   <script src="/static/script.js"></script>
 </body>
 </html>

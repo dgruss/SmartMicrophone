@@ -10,16 +10,36 @@ function printLog(msg) {
 }
 // Tab switching logic
 document.addEventListener('DOMContentLoaded', function() {
+    // Request fullscreen helper (tries standard API and vendor-prefixed variants)
+    function requestFullscreenIfPossible() {
+        try {
+            const el = document.documentElement || document.body;
+            if (!el) return;
+            if (el.requestFullscreen) {
+                el.requestFullscreen().catch(() => {});
+            } else if (el.webkitRequestFullscreen) {
+                el.webkitRequestFullscreen();
+            } else if (el.mozRequestFullScreen) {
+                el.mozRequestFullScreen();
+            } else if (el.msRequestFullscreen) {
+                el.msRequestFullscreen();
+            }
+        } catch (e) {}
+    }
     // Initialize debug output and toggle button after DOM is ready
     debugOutputField = document.getElementById('debugOutput');
     if (debugOutputField) {
-        debugOutputField.style.display = 'block';
+        // keep hidden by default; only show when user toggles inside Settings
+        debugOutputField.style.display = 'none';
         debugOutputField.style.height = '160px';
         debugOutputField.value = '';
     }
     const toggleDebugBtnInit = document.getElementById('toggleDebug');
     if (toggleDebugBtnInit && debugOutputField) {
         toggleDebugBtnInit.addEventListener('click', function() {
+            // Only allow toggling when Settings panel is visible
+            const settingsPanelEl = document.getElementById('settingsPanel');
+            if (settingsPanelEl && settingsPanelEl.style.display !== 'flex') return;
             debugOutputField.style.display = (debugOutputField.style.display === 'none' || debugOutputField.style.display === '') ? 'block' : 'none';
         });
     }
@@ -392,6 +412,10 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (e) {
             printLog('Error starting WebRTC: ' + e);
         }
+        // Try to request fullscreen on page load (may be blocked if not a user gesture)
+        try {
+            requestFullscreenIfPossible();
+        } catch (e) {}
     } else {
         nameEntry.style.display = 'flex';
         mainLobby.style.display = 'none';
@@ -425,6 +449,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 nameEntry.style.display = 'none';
                 mainLobby.style.display = 'flex';
 
+                // Request fullscreen after the user clicked Continue (user gesture)
+                try { requestFullscreenIfPossible(); } catch (e) {}
+
                 // Restore membership: if user was in a mic room, put them back there; otherwise add to lobby
                 if (prevRoom && prevRoom !== 'lobby') {
                     rooms[prevRoom].push(userName);
@@ -434,12 +461,35 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 updateRoomDisplays();
                 updateMicDisplay();
-                updateDebugBanner();
             }
         };
     } else {
         printLog('Warning: saveNameBtn not found');
     }
+    // Load audio settings from localStorage and initialize checkboxes
+    try {
+        const ns = localStorage.getItem('optNoiseSuppression') === 'true';
+        const ec = localStorage.getItem('optEchoCancellation') === 'true';
+        const ag = localStorage.getItem('optAutoGain') === 'true';
+        const nsEl = document.getElementById('optNoiseSuppression');
+        const ecEl = document.getElementById('optEchoCancellation');
+        const agEl = document.getElementById('optAutoGain');
+        if (nsEl) { nsEl.checked = ns; nsEl.addEventListener('change', () => { localStorage.setItem('optNoiseSuppression', nsEl.checked); }); }
+        if (ecEl) { ecEl.checked = ec; ecEl.addEventListener('change', () => { localStorage.setItem('optEchoCancellation', ecEl.checked); }); }
+        if (agEl) { agEl.checked = ag; agEl.addEventListener('change', () => { localStorage.setItem('optAutoGain', agEl.checked); }); }
+    } catch (e) { }
+    // Initialize delay control
+    try {
+        const delayKey = 'playerDelayMs';
+        let delay = parseInt(localStorage.getItem(delayKey) || '0') || 0;
+        const disp = document.getElementById('delayDisplay');
+        const plus = document.getElementById('delayPlus');
+        const minus = document.getElementById('delayMinus');
+        function renderDelay() { if (disp) disp.textContent = `${delay} ms`; }
+        renderDelay();
+        if (plus) plus.addEventListener('click', () => { delay += 10; localStorage.setItem(delayKey, String(delay)); renderDelay(); });
+        if (minus) minus.addEventListener('click', () => { delay = Math.max(0, delay - 10); localStorage.setItem(delayKey, String(delay)); renderDelay(); });
+    } catch (e) {}
     // allow pressing Enter in the name input to save
     if (userNameInput) {
         userNameInput.addEventListener('keydown', (e) => {
@@ -469,11 +519,12 @@ document.addEventListener('DOMContentLoaded', function() {
         printLog(`Attempting to join lobby as ${userName}`);
         // Try server-side join first
         try {
+            const delayVal = parseInt(localStorage.getItem('playerDelayMs') || '0') || 0;
             const res = await fetch('/rooms/join', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 credentials: 'include',
-                body: JSON.stringify({room: 'lobby', name: userName})
+                body: JSON.stringify({room: 'lobby', name: userName, delay: delayVal})
             });
             const data = await res.json();
             if (data && data.success) {
@@ -482,7 +533,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.name) { userName = data.name; localStorage.setItem('userName', userName); }
                 printLog(`Joined lobby (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
                 updateRoomDisplays();
-                updateDebugBanner();
                 return;
             } else {
                 printLog('Server join failed: ' + (data && data.error));
@@ -496,18 +546,18 @@ document.addEventListener('DOMContentLoaded', function() {
         Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
         rooms.lobby.push(userName);
         updateRoomDisplays();
-        updateDebugBanner();
     }
 
     async function selectMicBox(micNum) {
         const target = 'mic' + micNum;
         printLog(`Attempting to join ${target} as ${userName}`);
         try {
+            const delayVal = parseInt(localStorage.getItem('playerDelayMs') || '0') || 0;
             const res = await fetch('/rooms/join', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 credentials: 'include',
-                body: JSON.stringify({room: target, name: userName})
+                body: JSON.stringify({room: target, name: userName, delay: delayVal})
             });
             const data = await res.json();
             if (data && data.success) {
@@ -515,7 +565,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.name) { userName = data.name; localStorage.setItem('userName', userName); }
                 printLog(`Joined ${target} (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
                 updateRoomDisplays();
-                updateDebugBanner();
                 return;
             } else {
                 printLog('Server join failed: ' + (data && data.error));
@@ -528,7 +577,6 @@ document.addEventListener('DOMContentLoaded', function() {
         Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
         rooms['mic' + micNum].push(userName);
         updateRoomDisplays();
-        updateDebugBanner();
     }
 
     function updateRoomDisplays() {
@@ -560,24 +608,6 @@ document.addEventListener('DOMContentLoaded', function() {
         //printLog(`Room state updated: ${JSON.stringify(rooms)}`);
     }
 
-    function updateDebugBanner() {
-        let banner = document.getElementById('debugBanner');
-        if (!banner) {
-            banner = document.createElement('div');
-            banner.id = 'debugBanner';
-            banner.style.position = 'fixed';
-            banner.style.bottom = '10px';
-            banner.style.left = '10px';
-            banner.style.padding = '8px 12px';
-            banner.style.background = 'rgba(0,0,0,0.7)';
-            banner.style.color = '#fff';
-            banner.style.borderRadius = '8px';
-            banner.style.zIndex = 9999;
-            document.body.appendChild(banner);
-        }
-        banner.textContent = `You: ${userName || '(none)'} | Lobby: [${rooms.lobby.join(', ')}] | Mic1: [${rooms.mic1.join(', ')}]`;
-    }
-
     function updateMicDisplay() {
         micBoxes.forEach((box, idx) => {
             let user = micAssignments[idx];
@@ -602,26 +632,33 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Live update: poll server for authoritative room list every 2s
-    async function refreshRoomsFromServer() {
+    // Unified status polling (rooms + control) every 2s. This also acts as a heartbeat
+    // so the server can detect dead clients. If the client doesn't poll for >10s,
+    // the server will disconnect its webrtc session.
+    async function pollStatus() {
         try {
-            const res = await fetch('/rooms', {credentials: 'include'});
+            const res = await fetch('/status', {credentials: 'include'});
             const data = await res.json();
-            if (data && data.success && data.rooms) {
-                rooms = data.rooms;
-                updateRoomDisplays();
-                updateDebugBanner();
-                return;
+            if (data && data.success) {
+                if (data.rooms) {
+                    rooms = data.rooms;
+                    updateRoomDisplays();
+                }
+                if (data.control) {
+                    controlOwner = data.control.owner;
+                    controlName = data.control.owner_name;
+                    // update control UI if the control tab is present
+                    try { updateControlUI(); } catch (e) {}
+                }
             }
         } catch (e) {
             // ignore network errors and keep local state
+            // keep trying; server will disconnect stale sessions after 10s
         }
-        // fallback: just refresh UI from local rooms
-        updateRoomDisplays();
     }
-    // initial refresh and interval
-    refreshRoomsFromServer();
-    setInterval(refreshRoomsFromServer, 2000);
+    // initial poll and interval
+    pollStatus();
+    setInterval(pollStatus, 2000);
 
     // Start a WebRTC session with the server: create RTCPeerConnection, capture local mic,
     // send SDP offer to server (/api?action=start_webrtc) and apply returned SDP answer.
@@ -640,17 +677,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Optionally attach remote tracks to an <audio> element for monitoring
         pc.ontrack = (ev) => {
-            printLog('Received remote track');
+            // Received remote track; create a hidden audio element (no controls) so audio plays
+            printLog('Received remote track (hidden monitor)');
             let au = document.getElementById('remoteMonitor');
             if (!au) {
                 au = document.createElement('audio');
                 au.id = 'remoteMonitor';
                 au.autoplay = true;
-                au.controls = true;
-                au.style.position = 'fixed';
-                au.style.bottom = '10px';
-                au.style.right = '10px';
-                au.style.zIndex = 9999;
+                // do not add controls or append to DOM to avoid visual overlay
+                au.style.display = 'none';
                 document.body.appendChild(au);
             }
             au.srcObject = ev.streams && ev.streams[0] ? ev.streams[0] : new MediaStream(ev.track ? [ev.track] : []);
@@ -658,12 +693,31 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Get local microphone and add to PeerConnection
         try {
-            const localStream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+            // build audio constraints from saved settings
+            const audioConstraints = {};
+            try {
+                const ns = localStorage.getItem('optNoiseSuppression') === 'true';
+                const ec = localStorage.getItem('optEchoCancellation') === 'true';
+                const ag = localStorage.getItem('optAutoGain') === 'true';
+                audioConstraints.noiseSuppression = !!ns;
+                audioConstraints.echoCancellation = !!ec;
+                audioConstraints.autoGainControl = !!ag;
+            } catch (e) {}
+            const localStream = await navigator.mediaDevices.getUserMedia({audio: audioConstraints, video: false});
             localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
         } catch (e) {
             printLog('getUserMedia failed: ' + e);
             // proceed without local audio if permission denied
         }
+
+        // monitor ICE connection state for automatic reconnect attempts
+        pc.addEventListener('iceconnectionstatechange', () => {
+            printLog('PC iceConnectionState: ' + pc.iceConnectionState);
+            if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                // schedule a reconnect attempt
+                tryScheduleReconnect();
+            }
+        });
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -687,6 +741,36 @@ document.addEventListener('DOMContentLoaded', function() {
         return pc;
     }
 
+    // Reconnect logic with exponential backoff
+    let _reconnectAttempts = 0;
+    let _reconnectTimer = null;
+    function tryScheduleReconnect() {
+        if (_reconnectTimer) return; // already scheduled
+        _reconnectAttempts = Math.min(6, _reconnectAttempts + 1);
+        const delay = Math.min(60, Math.pow(2, _reconnectAttempts));
+        printLog('Scheduling reconnect attempt in ' + delay + 's (attempt ' + _reconnectAttempts + ')');
+        _reconnectTimer = setTimeout(async () => {
+            _reconnectTimer = null;
+            try {
+                printLog('Attempting reconnect (attempt ' + _reconnectAttempts + ')');
+                // re-join lobby/room on server to ensure server-side session exists
+                await joinLobby();
+                // restart WebRTC session
+                if (window.smartMicPC) {
+                    try { window.smartMicPC.close(); } catch(e){}
+                    window.smartMicPC = null;
+                }
+                await startWebRTCSession();
+                _reconnectAttempts = 0; // reset on success
+                printLog('Reconnect successful');
+            } catch (e) {
+                printLog('Reconnect failed: ' + e);
+                // schedule next attempt
+                tryScheduleReconnect();
+            }
+        }, delay * 1000);
+    }
+
     // Try real-time updates via Server-Sent Events. If SSE is available on the
     // server, this will push immediate room updates; polling remains as a
     // fallback.
@@ -699,7 +783,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (payload && payload.rooms) {
                         rooms = payload.rooms;
                         updateRoomDisplays();
-                        updateDebugBanner();
                         printLog('Received SSE rooms update');
                     }
                 } catch (e) { /* ignore parse errors */ }
@@ -1207,4 +1290,96 @@ document.addEventListener('DOMContentLoaded', function() {
         try { window.releaseControl && window.releaseControl(); } catch(e){}
     });
 
+});
+
+// Lock overlay behavior: drag-to-unlock
+document.addEventListener('DOMContentLoaded', function() {
+    try {
+        const lockBtn = document.getElementById('lockBtn');
+        const lockOverlay = document.getElementById('lockOverlay');
+        const unlockTrack = document.getElementById('unlockTrack');
+        const unlockHandle = document.getElementById('unlockHandle');
+        if (!lockBtn || !lockOverlay || !unlockTrack || !unlockHandle) return;
+
+        let dragging = false;
+        let startX = 0;
+        let handleStartLeft = 0;
+
+        function showLock() {
+            lockOverlay.style.display = 'flex';
+            lockOverlay.setAttribute('aria-hidden', 'false');
+            document.documentElement.style.overflow = 'hidden';
+            // reset handle
+            unlockHandle.style.left = '6px';
+        }
+
+        function hideLock() {
+            lockOverlay.style.display = 'none';
+            lockOverlay.setAttribute('aria-hidden', 'true');
+            document.documentElement.style.overflow = '';
+            // reset handle
+            unlockHandle.style.left = '6px';
+        }
+
+        lockBtn.addEventListener('click', (e) => { e.preventDefault(); showLock(); });
+
+        // pointer events for dragging
+        unlockHandle.addEventListener('pointerdown', (ev) => {
+            ev.preventDefault();
+            dragging = true;
+            startX = ev.clientX;
+            handleStartLeft = parseFloat(getComputedStyle(unlockHandle).left || '6').valueOf();
+            unlockHandle.setPointerCapture(ev.pointerId);
+        });
+
+        unlockHandle.addEventListener('pointermove', (ev) => {
+            if (!dragging) return;
+            ev.preventDefault();
+            const rect = unlockTrack.getBoundingClientRect();
+            const handleRect = unlockHandle.getBoundingClientRect();
+            const minLeft = 6;
+            const maxLeft = rect.width - handleRect.width - 6;
+            let dx = ev.clientX - startX;
+            let newLeft = handleStartLeft + dx;
+            newLeft = Math.max(minLeft, Math.min(maxLeft, newLeft));
+            unlockHandle.style.left = newLeft + 'px';
+        });
+
+        function endDrag(ev) {
+            if (!dragging) return;
+            dragging = false;
+            try { unlockHandle.releasePointerCapture(ev.pointerId); } catch(e){}
+            const rect = unlockTrack.getBoundingClientRect();
+            const handleRect = unlockHandle.getBoundingClientRect();
+            const minLeft = 6;
+            const maxLeft = rect.width - handleRect.width - 6;
+            const curLeft = parseFloat(getComputedStyle(unlockHandle).left || '6');
+            const progress = (curLeft - minLeft) / Math.max(1, (maxLeft - minLeft));
+            if (progress >= 0.70) {
+                // unlocked
+                hideLock();
+            } else {
+                // animate back to start
+                unlockHandle.style.transition = 'left 180ms ease-out';
+                unlockHandle.style.left = minLeft + 'px';
+                setTimeout(() => { unlockHandle.style.transition = ''; }, 200);
+            }
+        }
+
+        unlockHandle.addEventListener('pointerup', endDrag);
+        unlockHandle.addEventListener('pointercancel', endDrag);
+        // Also allow releasing anywhere on the track
+        unlockTrack.addEventListener('pointerup', endDrag);
+        unlockTrack.addEventListener('pointercancel', endDrag);
+
+        // Prevent accidental scrolling/selection while locked
+        lockOverlay.addEventListener('touchmove', (e) => { if (lockOverlay.style.display === 'flex') e.preventDefault(); }, {passive:false});
+
+        // Optional: allow pressing Escape to unlock
+        document.addEventListener('keydown', (e) => {
+            if (lockOverlay.style.display === 'flex' && e.key === 'Escape') hideLock();
+        });
+    } catch (e) {
+        printLog('Lock UI initialization failed: ' + e);
+    }
 });

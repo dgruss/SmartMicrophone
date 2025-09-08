@@ -34,6 +34,7 @@ class WebRTCMicrophone:
     def __init__(self, player_id):
         self.player_id = player_id
         self.proc = None
+        self.started_at = None
         # webrtc-cli will create playback ports; we record discovered pw port ids here
         self.pw_ports = {}  # e.g. {'FL': 133, 'FR': 132}
         # legacy sink_name kept for compatibility with older code paths
@@ -82,6 +83,7 @@ class WebRTCMicrophone:
             return check_result
 
         logger.info(f"{self.player_id}: Started webrtc-cli process")
+        self.started_at = time.time()
 
         # Pipe the offer into the process
         try:
@@ -130,6 +132,44 @@ class WebRTCMicrophone:
         else:
             logger.warning(f"{self.player_id}: No new pw ports detected for webrtc-cli; pw-link may not find this session")
         return {'success': True, 'answer': answer, 'player_id': self.player_id}
+
+    def is_process_alive(self):
+        """Return True if the underlying webrtc-cli process appears alive.
+
+        Checks both the subprocess state and whether the discovered PipeWire ports still exist
+        (if we recorded them). This is a best-effort liveness check used by the manager monitor.
+        """
+        # Basic check: subprocess still running
+        if not self.proc:
+            return False
+        try:
+            if self.proc.poll() is not None:
+                return False
+        except Exception:
+            # If poll fails, treat as dead
+            return False
+
+        # If we know pw_ports, ensure those ids are still present in pw-link
+        try:
+            current = self._list_pw_port_ids()
+            if not current:
+                # No ports listed right now; allow short-lived gap and consider process alive
+                return True
+            if self.pw_ports:
+                # pw_ports values may be ints or lists; check presence
+                for v in self.pw_ports.values():
+                    if isinstance(v, (list, tuple)):
+                        # at least one id from the list must still exist
+                        ok = any(int(x) in current for x in v)
+                        if not ok:
+                            return False
+                    else:
+                        if int(v) not in current:
+                            return False
+        except Exception:
+            # if pw-listing fails, don't be overly aggressive
+            return True
+        return True
 
     def __stop_webrtc_process(self):
         try:
@@ -266,7 +306,51 @@ class WebRTCMicrophoneManager:
         self.microphones = {}  # player_id -> WebRTCMicrophone instance
         self.source_connections = {}  # player_id -> sink_index
         self._source_lock = threading.Lock()
+        # queue to serialize starting webrtc-cli processes to avoid pw-link races
+        self._start_queue = []  # list of player_id in FIFO order
+        self._start_cond = threading.Condition()
         self.ensure_default_sinks()
+        # start background monitor thread to detect dead webrtc-cli processes
+        try:
+            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._monitor_thread.start()
+        except Exception:
+            logger.exception('Failed to start monitor thread')
+
+    def _monitor_loop(self):
+        """Background loop that periodically checks microphones and cleans up dead processes."""
+        while True:
+            try:
+                time.sleep(5.0)
+                with self._source_lock:
+                    for pid, mic in list(self.microphones.items()):
+                        try:
+                            alive = mic.is_process_alive()
+                        except Exception:
+                            alive = False
+                        if not alive:
+                            logger.warning(f"Monitor: microphone {pid} appears dead; cleaning up")
+                            try:
+                                # attempt to disconnect any links first
+                                try:
+                                    self.disconnect_microphone(pid)
+                                except Exception:
+                                    logger.exception('Error while disconnecting microphone during cleanup')
+                                # stop and remove process
+                                mic.stop()
+                            except Exception:
+                                logger.exception('Failed to stop mic during cleanup')
+                            # remove from maps
+                            try:
+                                del self.microphones[pid]
+                            except Exception:
+                                pass
+                            try:
+                                self.source_connections.pop(pid, None)
+                            except Exception:
+                                pass
+            except Exception:
+                logger.exception('Exception in monitor loop')
 
     def ensure_default_sinks(self):
         """Ensure all 7 sinks (lobby + 6 game mics) exist."""
@@ -325,21 +409,87 @@ class WebRTCMicrophoneManager:
 
     def start_microphone(self, player_id, offer):
         """Start a WebRTC microphone for a player (if not already running)."""
-        with self._source_lock:
-            if player_id in self.microphones:
-                self.microphones[player_id].stop()
-                del self.microphones[player_id]
-            mic = WebRTCMicrophone(player_id)
-            self.microphones[player_id] = mic
+        # Enqueue the start request and wait for our turn. This serializes process
+        # creation so PipeWire pw-link output ports are not created concurrently,
+        # avoiding race conditions when multiple clients connect simultaneously.
+        wait_timeout = 20.0  # seconds to wait for the start slot
+        with self._start_cond:
+            self._start_queue.append(player_id)
+            start_ts = time.time()
+            while True:
+                # if we're at the head of the queue, proceed
+                if self._start_queue and self._start_queue[0] == player_id:
+                    break
+                elapsed = time.time() - start_ts
+                remaining = wait_timeout - elapsed
+                if remaining <= 0:
+                    # timed out waiting for slot; remove ourselves and return error
+                    try:
+                        self._start_queue.remove(player_id)
+                    except Exception:
+                        pass
+                    return {'success': False, 'error': 'Timed out waiting to start session'}
+                self._start_cond.wait(remaining)
+
+        # At this point we are the head of the queue and may safely start the process.
+        try:
+            with self._source_lock:
+                if player_id in self.microphones:
+                    try:
+                        self.microphones[player_id].stop()
+                    except Exception:
+                        logger.exception('Error stopping existing microphone before start')
+                    try:
+                        del self.microphones[player_id]
+                    except Exception:
+                        pass
+                mic = WebRTCMicrophone(player_id)
+                self.microphones[player_id] = mic
+            # perform the actual start (this may invoke pw-link / wait for ports)
             return mic.start(offer)
+        finally:
+            # Remove ourselves from the queue and wake the next waiter
+            with self._start_cond:
+                try:
+                    if self._start_queue and self._start_queue[0] == player_id:
+                        self._start_queue.pop(0)
+                    else:
+                        try:
+                            self._start_queue.remove(player_id)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    self._start_cond.notify_all()
+                except Exception:
+                    pass
 
     def remove_microphone(self, player_id):
         """Stop and remove a player's microphone and null-sink."""
+        # If a start request is pending in the queue, remove it so it doesn't block others
+        try:
+            with self._start_cond:
+                if player_id in self._start_queue:
+                    try:
+                        self._start_queue.remove(player_id)
+                    except Exception:
+                        pass
+                    try:
+                        self._start_cond.notify_all()
+                    except Exception:
+                        pass
+        except Exception:
+            logger.exception('Error removing pending start queue entry')
+
         with self._source_lock:
             mic = self.microphones.get(player_id)
             if mic:
                 mic.stop()
-                del self.microphones[player_id]
+                try:
+                    del self.microphones[player_id]
+                except Exception:
+                    pass
             self.source_connections.pop(player_id, None)
             return {'success': True}
 
