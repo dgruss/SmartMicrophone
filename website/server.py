@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 from flask import Flask, render_template, request, jsonify, session, send_file, send_from_directory
@@ -307,6 +306,29 @@ def run_xdotool_command(args):
         logger.exception('Error running xdotool: %s', e)
         return False, str(e)
 
+@app.route('/player/delay', methods=['POST'])
+def player_delay():
+    """Update the current player's delay (ms). JSON: {delay: <ms>}"""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        delay_val = data.get('delay')
+        if delay_val is None:
+            return jsonify({'success': False, 'error': 'Missing delay'}), 400
+        sid = session.get('session_id')
+        if not sid:
+            sid = random.randint(1000000, 9999999)
+            session['session_id'] = sid
+        try:
+            SESSION_DELAYS[sid] = int(delay_val)
+        except Exception:
+            SESSION_DELAYS[sid] = 0
+        try:
+            update_config_players()
+        except Exception:
+            pass
+        return jsonify({'success': True, 'delay': SESSION_DELAYS[sid]})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/control/status', methods=['GET'])
 def control_status():
@@ -641,19 +663,21 @@ def update_config_players():
                 # merge multiple players in a single mic with ' & '
                 merged = ' & '.join(users)
                 player_names.append(merged)
-                # determine delay for first user in room (if we have a session mapping)
-                delay_ms = 0
-                try:
-                    first_user = users[0]
-                    # find a session id that maps to this username
-                    found_sid = None
+                # Compute average delay for all users in the room
+                delays = []
+                for user in users:
+                    # Find all session ids for this username (could be more than one if duplicate names)
                     for sid_k, uname in SESSION_USERNAMES.items():
-                        if uname == first_user:
-                            found_sid = sid_k
-                            break
-                    if found_sid is not None:
-                        delay_ms = int(SESSION_DELAYS.get(found_sid, 0) or 0)
-                except Exception:
+                        if uname == user:
+                            delay = SESSION_DELAYS.get(sid_k)
+                            if delay is not None:
+                                try:
+                                    delays.append(int(delay))
+                                except Exception:
+                                    pass
+                if delays:
+                    delay_ms = int(sum(delays) / len(delays))
+                else:
                     delay_ms = 0
                 player_delays.append(str(delay_ms))
             else:
@@ -664,11 +688,11 @@ def update_config_players():
         for i, name in enumerate(player_names, start=1):
             cp['Name'][f'P{i}'] = name
 
-        # Write Delays P1..P6 in [Delays]
-        if 'Delays' not in cp:
-            cp.add_section('Delays')
+        # Write PlayerDelay P1..P6 in [PlayerDelay]
+        if 'PlayerDelay' not in cp:
+            cp.add_section('PlayerDelay')
         for i, d in enumerate(player_delays, start=1):
-            cp['Delays'][f'P{i}'] = str(d)
+            cp['PlayerDelay'][f'P{i}'] = str(d)
 
         # Player count is determined by the highest mic index in use:
         # Mic 1 -> 1, Mic 2 -> 2, Mic 3 -> 3, Mic 4 -> 4, Mic 5 -> 6, Mic 6 -> 6
@@ -923,7 +947,7 @@ def signal_handler(signum, frame):
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.basicConfig(filename='virtual-microphone.log', level=logging.DEBUG)
+    logging.basicConfig(filename='virtual-microphone.log', level=logging.INFO)
 
     WebRTCMicrophoneManager()
 

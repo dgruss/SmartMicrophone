@@ -487,8 +487,76 @@ document.addEventListener('DOMContentLoaded', function() {
         const minus = document.getElementById('delayMinus');
         function renderDelay() { if (disp) disp.textContent = `${delay} ms`; }
         renderDelay();
-        if (plus) plus.addEventListener('click', () => { delay += 10; localStorage.setItem(delayKey, String(delay)); renderDelay(); });
-        if (minus) minus.addEventListener('click', () => { delay = Math.max(0, delay - 10); localStorage.setItem(delayKey, String(delay)); renderDelay(); });
+
+        // network send helper (POSTs updated delay to server)
+        async function sendPlayerDelay(newDelay) {
+            try {
+                await fetch('/player/delay', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({delay: newDelay})
+                });
+            } catch (e) { /* ignore network errors for now */ }
+        }
+
+        // Hold-to-repeat behavior for +/- buttons.
+        const MIN_DELAY = -1000;
+        const MAX_DELAY = 1000;
+        let lastSentDelay = parseInt(localStorage.getItem(delayKey) || '0') || 0;
+
+        function clamp(v) {
+            return Math.min(MAX_DELAY, Math.max(MIN_DELAY, v));
+        }
+
+        function setupHoldButton(elem, delta) {
+            if (!elem) return;
+            let intervalId = null;
+            let active = false;
+
+            const doStep = () => {
+                delay = clamp(delay + delta);
+                localStorage.setItem(delayKey, String(delay));
+                renderDelay();
+            };
+
+            const start = (ev) => {
+                ev.preventDefault();
+                if (active) return;
+                active = true;
+                // take one immediate step on press
+                doStep();
+                // then continue stepping every 100ms while held
+                intervalId = setInterval(doStep, 100);
+            };
+
+            const stop = (/*ev*/) => {
+                if (!active) return;
+                active = false;
+                if (intervalId) { clearInterval(intervalId); intervalId = null; }
+                // Only send if value changed since last send
+                if (delay !== lastSentDelay) {
+                    lastSentDelay = delay;
+                    sendPlayerDelay(delay);
+                }
+            };
+
+            // mouse events
+            elem.addEventListener('mousedown', start);
+            elem.addEventListener('mouseup', stop);
+            elem.addEventListener('mouseleave', stop);
+            // touch events
+            elem.addEventListener('touchstart', start, {passive:false});
+            elem.addEventListener('touchend', stop);
+            elem.addEventListener('touchcancel', stop);
+            // Ensure release anywhere stops repeating
+            document.addEventListener('mouseup', stop);
+            document.addEventListener('touchend', stop);
+            document.addEventListener('touchcancel', stop);
+        }
+
+        setupHoldButton(plus, +10);
+        setupHoldButton(minus, -10);
     } catch (e) {}
     // allow pressing Enter in the name input to save
     if (userNameInput) {
