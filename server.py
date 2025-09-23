@@ -13,6 +13,27 @@ import subprocess
 import json
 import threading
 import queue
+import configparser
+import argparse
+import logging
+import sys
+import socket
+import time
+
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.WARNING)
+
+class NoSpaceConfigParser(configparser.ConfigParser):
+    def _write_section(self, fp, section_name, section_items, delimiter):
+        fp.write(f"[{section_name}]\n")
+        for key, value in section_items:
+            if value is not None or not self.allow_no_value:
+                value = str(value).replace('\n', '\n\t')
+                fp.write(f"{key}={value}\n")
+            else:
+                fp.write(f"{key}\n")
+        fp.write("\n")
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +138,7 @@ def status():
 @app.before_request
 def log_incoming_request():
     try:
-        if not request.path in ['/rooms', '/control/status']:
+        if not request.path in ['/rooms', '/status', '/control/status']:
             logger.info('Incoming request: %s %s args=%s', request.method, request.path, dict(request.args))
     except Exception:
         pass
@@ -437,7 +458,7 @@ def get_mic_assignments():
     return result
 
 
-def scan_songs_and_build_index(find_root='../../usdx'):
+def scan_songs_and_build_index(find_root=None):
     """Scan the given root for songs under any 'songs' directory and build a JSON index.
 
     The index will be written to website/data/songs_index.json (next to this server file).
@@ -449,7 +470,9 @@ def scan_songs_and_build_index(find_root='../../usdx'):
     paths_file = os.path.join(data_dir, 'song_txt_paths.txt')
     index_file = os.path.join(data_dir, 'songs_index.json')
 
-    cmd = ['find', find_root, '-path', '*/songs/*', '-type', 'f', '-name', '*.txt']
+    if find_root is None:
+        find_root = args.usdx_dir
+    cmd = ['find', '-L', find_root, '-path', '*/songs/*', '-type', 'f', '-name', '*.txt']
     logger.info('Scanning songs with: %s', ' '.join(cmd))
     try:
         proc = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True, check=False)
@@ -468,9 +491,10 @@ def scan_songs_and_build_index(find_root='../../usdx'):
 
     entries = []
     for i, txtpath in enumerate(lines):
-      m4apath = os.path.splitext(txtpath)[0] + '.m4a'
-      display = os.path.splitext(os.path.basename(txtpath))[0].replace('_', ' ')
-      entries.append({'id': i+1, 'txt': txtpath, 'm4a': m4apath, 'display': display, 'upl': False})
+        audio_ext = args.audio_format if 'args' in globals() else 'm4a'
+        audio_path = os.path.splitext(txtpath)[0] + f'.{audio_ext}'
+        display = os.path.splitext(os.path.basename(txtpath))[0].replace('_', ' ')
+        entries.append({'id': i+1, 'txt': txtpath, audio_ext: audio_path, 'display': display, 'upl': False})
 
     try:
         with open(index_file, 'w', encoding='utf-8') as fh:
@@ -624,9 +648,19 @@ def rooms_leave():
     except Exception as e:
         logger.exception('Failed to leave room: %s', e)
         return jsonify({'success': False, 'error': str(e)}), 500
-    
+    logger.info('User %s left all rooms', username)
+    try:
+        notify_rooms_update()
+    except Exception:
+        pass
+    try:
+        update_config_players()
+    except Exception:
+        pass
+    return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+
 def update_config_players():
-    """Update ../../usdx/config.ini P1..P6 and [Game] Players based on ROOMS.
+    """Update config.ini P1..P6 and [Game] Players based on ROOMS.
 
     Rules:
     - For mic1..mic6, merge multiple names with ' & '. If empty, write 'None'.
@@ -635,13 +669,12 @@ def update_config_players():
     """
     try:
         base_dir = os.path.dirname(__file__)
-        cfg_path = os.path.realpath(os.path.join(base_dir, '../../usdx/config.ini'))
+        cfg_path = os.path.realpath(os.path.join(base_dir, args.usdx_dir, 'config.ini'))
         if not os.path.exists(cfg_path):
             logger.warning('Config path not found: %s', cfg_path)
             return False
 
-        import configparser
-        cp = configparser.ConfigParser()
+        cp = NoSpaceConfigParser()
         # preserve case for keys
         cp.optionxform = str
         with open(cfg_path, 'r', encoding='utf-8', errors='ignore') as fh:
@@ -728,17 +761,6 @@ def update_config_players():
             pass
         return False
 
-        logger.info('User %s left all rooms', username)
-        try:
-            notify_rooms_update()
-        except Exception:
-            pass
-        try:
-            update_config_players()
-        except Exception:
-            pass
-        return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
-
 @app.route('/songs/search', methods=['GET'])
 def songs_search():
     q = request.args.get('q', '').strip().lower()
@@ -779,7 +801,7 @@ def songs_add_to_upl():
             if txt_rel:
                 candidate_txt = os.path.realpath(os.path.join(os.path.dirname(__file__), txt_rel))
                 # ensure txt is inside allowed root (same root used for previews)
-                allowed_root = os.path.realpath(os.path.join(os.path.dirname(__file__), '../../usdx'))
+                allowed_root = os.path.realpath(os.path.join(os.path.dirname(__file__), args.usdx_dir))
                 if candidate_txt.startswith(allowed_root) and os.path.exists(candidate_txt):
                     artist = None
                     title = None
@@ -813,7 +835,7 @@ def songs_add_to_upl():
 
         if not line:
             line = entry.get('display') or os.path.splitext(os.path.basename(entry.get('txt','')))[0].replace('_',' ')
-        upl_path = os.path.realpath(os.path.join(os.path.dirname(__file__), '../../usdx/playlists', 'SmartMicSession.upl'))
+        upl_path = os.path.realpath(os.path.join(os.path.dirname(__file__), args.usdx_dir, 'playlists', args.playlist_name))
 
         # Ensure upl file exists
         try:
@@ -883,7 +905,7 @@ def songs_preview():
         # ID-based preview only: client must supply ?id=<id>
         id_param = request.args.get('id')
         base_dir = os.path.dirname(__file__)
-        allowed_root = os.path.realpath(os.path.join(base_dir, '../../usdx'))
+        allowed_root = os.path.realpath(os.path.join(base_dir, args.usdx_dir, 'songs'))
 
         if not id_param:
             logger.info('Preview called without id')
@@ -912,7 +934,8 @@ def songs_preview():
                 logger.warning('Preview id not found: %s', id_param)
                 return jsonify({'success': False, 'error': 'Not found', 'id': id_param}), 404
 
-            m4apath = found.get('m4a')
+            audio_ext = args.audio_format if 'args' in globals() else 'm4a'
+            m4apath = found.get(audio_ext)
             candidate = os.path.realpath(os.path.join(base_dir, m4apath))
             logger.info('Preview by id=%s resolved to %s', id_param, candidate)
         except Exception as e:
@@ -940,14 +963,245 @@ def signal_handler(signum, frame):
     print(f"Received signal {signum}, shutting down gracefully...")
     WebRTCMicrophoneManager().stop()
     print("All microphones stopped. Exiting now.")
-
+    # Cleanup iptables entries for port remapping if they were created
+    if 'args' in globals() and getattr(args, 'remap_ssl_port', False):
+      print("Cleaning up iptables port remapping rules...")
+      try:
+        ip_list = []
+        for iface in socket.if_nameindex():
+          name = iface[1]
+          try:
+            for fam, _, _, _, sockaddr in socket.getaddrinfo(name, None):
+              if fam == socket.AF_INET:
+                ip = sockaddr[0]
+                if ip != "0.0.0.0" and ip != "127.0.0.1" and ip not in ip_list:
+                  ip_list.append(ip)
+          except Exception:
+            continue
+        for ip in ip_list:
+          del_cmd = [
+            "sudo", "iptables", "-t", "nat", "-D", "PREROUTING",
+            "-p", "tcp", "-d", ip, "--dport", "443",
+            "-j", "REDIRECT", "--to-port", str(args.port)
+          ]
+          print("Removing:", " ".join(del_cmd))
+          result = subprocess.run(del_cmd, capture_output=True, text=True)
+          if result.returncode == 0:
+            print(f"Removed iptables rule for {ip}:443 -> {args.port}")
+          else:
+            print(f"Failed to remove rule for {ip}: {result.stderr}")
+      except Exception as e:
+        print("Error cleaning up iptables rules:", e)
     #time.sleep(0.1)  # Give some time for cleanup
     raise RuntimeError("Server going down")
 
+def initialize_record_section():
+    base_dir = os.path.dirname(__file__)
+    cfg_path = os.path.realpath(os.path.join(base_dir, args.usdx_dir, 'config.ini'))
+    if not os.path.exists(cfg_path):
+        print(f"Config path not found: {cfg_path}")
+        sys.exit(1)
+    cp = NoSpaceConfigParser()
+    cp.optionxform = str
+    with open(cfg_path, 'r', encoding='utf-8', errors='ignore') as fh:
+        cp.read_file(fh)
+    # Ensure [Record] section exists
+    if 'Record' not in cp:
+        cp.add_section('Record')
+    # Remove all DeviceName, Input, Latency, Channel1, Channel2 keys
+    keys_to_remove = [k for k in cp['Record'] if any(k.startswith(prefix) for prefix in ['DeviceName', 'Input', 'Latency', 'Channel1', 'Channel2'])]
+    for k in keys_to_remove:
+        cp.remove_option('Record', k)
+    # Add 6 virtual sinks
+    for i in range(1, 7):
+        cp['Record'][f'DeviceName[{i}]'] = f'smartphone-mic-{i-1}-sink Audio/Source/Virtual sink'
+        cp['Record'][f'Input[{i}]'] = '0'
+        cp['Record'][f'Latency[{i}]'] = '-1'
+        cp['Record'][f'Channel1[{i}]'] = str(i)
+    # Write back
+    tmp_path = cfg_path + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as fh:
+        cp.write(fh)
+    os.replace(tmp_path, cfg_path)
+    print(f"[Record] section in config.ini initialized for 6 virtual sinks.")
+
+def setup_domain_hotspot_mapping(domain):
+    CONF_PATH = "/etc/NetworkManager/dnsmasq-shared.d/usdx.conf"
+    print("Detecting Wi-Fi hotspots...")
+    try:
+        iw_result = subprocess.run(["iw", "dev"], capture_output=True, text=True)
+        hotspots = []
+        iface = None
+        for line in iw_result.stdout.splitlines():
+            if "Interface" in line:
+                iface = line.split()[1]
+            if "type AP" in line and iface:
+                hotspots.append(iface)
+                iface = None
+        if not hotspots:
+            print("No Wi-Fi hotspot found.")
+        for IFACE in hotspots:
+            ip_result = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", IFACE], capture_output=True, text=True)
+            ip = None
+            for part in ip_result.stdout.split():
+                if "/" in part:
+                    ip = part.split("/")[0]
+                    break
+            if not ip:
+                print(f"Could not determine IP address for {IFACE}. Skipping.")
+                continue
+            print(f"Hotspot device: {IFACE}")
+            print(f"IP address: {ip}")
+            print("----")
+            # Prepare new config content
+            new_content = f"address=/{domain}/{ip}\nlocal-ttl=86400\n"
+            # Read current config if exists
+            current_content = None
+            if os.path.exists(CONF_PATH):
+                try:
+                    with open(CONF_PATH, "r") as conf:
+                        current_content = conf.read()
+                except Exception:
+                    current_content = None
+            # Only update if content differs
+            if current_content != new_content:
+                # Backup config with sudo
+                if os.path.exists(CONF_PATH):
+                    subprocess.run(["sudo", "cp", CONF_PATH, CONF_PATH + ".bak"])
+                    print(f"Backed up {CONF_PATH} to {CONF_PATH}.bak")
+                # Write new config with sudo tee
+                proc = subprocess.run(["echo", new_content], capture_output=True, text=True)
+                tee_proc = subprocess.run(["sudo", "tee", CONF_PATH], input=proc.stdout, text=True, capture_output=True)
+                if tee_proc.returncode != 0:
+                    print(f"Failed to write {CONF_PATH}: {tee_proc.stderr}")
+                    sys.exit(1)
+                # Set world-readable permissions
+                subprocess.run(["sudo", "chmod", "644", CONF_PATH])
+                print(f"Updated {CONF_PATH}:")
+                print(new_content)
+                # Restart NetworkManager
+                print("Restarting NetworkManager to apply changes...")
+                result = subprocess.run(["sudo", "systemctl", "restart", "NetworkManager"])
+                if result.returncode == 0:
+                    print("NetworkManager restarted successfully.")
+                else:
+                    print("Failed to restart NetworkManager. Please check manually.")
+            else:
+                print(f"No changes needed for {CONF_PATH}.")
+        print("All done!")
+    except Exception as e:
+        print("Error during domain setup:", e, file=sys.stderr)
+        sys.exit(1)
+
+def remap_ssl_port():
+    print("Remapping port 443 to port", args.port, "using iptables...")
+    try:
+        # Use 'ip -4 -o addr show' to get all IPv4 addresses
+        ip_list = []
+        result = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    iface = parts[1]
+                    ip = parts[3].split('/')[0]
+                    # Exclude loopback, docker, and local addresses
+                    if iface.startswith('lo') or iface.startswith('docker'):
+                        continue
+                    if ip.startswith('127.') or ip.startswith('0.'):
+                        continue
+                    ip_list.append(ip)
+        if not ip_list:
+            print("No valid global IPv4 addresses found for remapping.")
+        for ip in ip_list:
+            # Check if rule already exists
+            check_cmd = ["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+            if check_result.returncode == 0:
+                print(f"Rule for {ip}:443 -> {args.port} already exists, skipping.")
+                continue
+            cmd = ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
+            print("Running:", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"Remapped 443 to {args.port} for {ip}")
+            else:
+                print(f"Failed to remap for {ip}: {result.stderr}")
+    except Exception as e:
+        print("Error remapping SSL port:", e)
+
+def handle_start_hotspot(hotspot_name):
+    if not hotspot_name:
+        return
+    status = subprocess.run(["nmcli", "c", "show", hotspot_name], capture_output=True, text=True)
+    if status.returncode == 0:
+        for line in status.stdout.splitlines():
+            if line.strip().startswith("ipv4.addresses:"):
+                ip = line.split(":", 1)[1].strip()
+                if ip and ip != '--':
+                    print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
+                    return
+    print(f"Bringing up hotspot '{hotspot_name}' with nmcli...")
+    result = subprocess.run(["nmcli", "c", "up", hotspot_name], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to start hotspot '{hotspot_name}': {result.stderr}")
+        sys.exit(1)
+    print(f"Hotspot '{hotspot_name}' activation requested. Waiting for it to have an IP address...")
+    # Wait for the hotspot to be up and have an IP address
+    for _ in range(20):
+        status = subprocess.run(["nmcli", "c", "show", hotspot_name], capture_output=True, text=True)
+        if status.returncode == 0:
+            for line in status.stdout.splitlines():
+                if line.strip().startswith("ipv4.addresses:"):
+                    ip = line.split(":", 1)[1].strip()
+                    if ip and ip != '--':
+                        print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
+                        return
+        time.sleep(1)
+    print(f"Timeout waiting for hotspot '{hotspot_name}' to have an IP address.")
+    sys.exit(1)
+
+
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description="SmartMicrophone server")
+
+    # Networking & Security
+    net_group = parser.add_argument_group('Networking & Security')
+    net_group.add_argument('--start-hotspot', type=str, default='', help='Start the given hotspot using nmcli before domain setup')
+    net_group.add_argument('--ssl', action='store_true', help='Enable SSL (requires --chain and --key)')
+    net_group.add_argument('--chain', type=str, default=None, help='SSL chain/cert file (fullchain.pem or cert.pem)')
+    net_group.add_argument('--key', type=str, default=None, help='SSL private key file (privkey.pem)')
+    net_group.add_argument('--port', type=int, default=5000, help='Port to run the server on (default: 5000)')
+    net_group.add_argument('--remap-ssl-port', action='store_true', help='Remap ports so that users can access the server on the default HTTPS port. Invokes iptables and sudo!')
+    net_group.add_argument('--domain', type=str, default='', help='Setup a domain to hotspot IP mapping via NetworkManager/dnsmasq, requires sudo')
+
+    # UltraStar Deluxe Integration
+    usdx_group = parser.add_argument_group('UltraStar Deluxe Integration')
+    usdx_group.add_argument('--usdx-dir', type=str, default='../usdx', help='Path to usdx directory (default: ../usdx)')
+    usdx_group.add_argument('--playlist-name', type=str, default='SmartMicSession.upl', help='Playlist filename (default: SmartMicSession.upl)')
+    usdx_group.add_argument('--run-usdx', action='store_true', help='Run UltraStar Deluxe after server startup')
+    usdx_group.add_argument('--audio-format', type=str, default='m4a', help='Audio format of songs in UltraStar Deluxe (default: m4a)')
+    usdx_group.add_argument('--set-inputs', action='store_true', help='Initialize [Record] section in config.ini for 6 virtual sinks')
+
+    # Server Options
+    server_group = parser.add_argument_group('Server Options')
+    server_group.add_argument('--debug', action='store_true', help='Enable debug mode')
+
+    args = parser.parse_args()
+
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.basicConfig(filename='virtual-microphone.log', level=logging.INFO)
+    logging.basicConfig(filename='virtual-microphone.log', level=logging.INFO if not args.debug else logging.DEBUG)
+
+    if args.start_hotspot:
+        handle_start_hotspot(args.start_hotspot)
+
+    if args.set_inputs:
+        initialize_record_section()
+
+    if args.domain != '':
+        setup_domain_hotspot_mapping(args.domain)
 
     WebRTCMicrophoneManager()
 
@@ -1011,23 +1265,52 @@ if __name__ == '__main__':
 
     # Build/update song index at startup
     try:
-        scan_songs_and_build_index()
+        scan_songs_and_build_index(find_root=args.usdx_dir)
     except Exception:
         logger.exception('Error scanning songs at startup')
 
-    # Ensure SmartMicSession.upl exists and is truncated at startup
+    # Ensure playlist file exists and is truncated at startup
     try:
         base_dir = os.path.dirname(__file__)
-        upl_dir = os.path.realpath(os.path.join(base_dir, '../../usdx/playlists'))
+        upl_dir = os.path.realpath(os.path.join(base_dir, args.usdx_dir, 'playlists'))
         os.makedirs(upl_dir, exist_ok=True)
-        upl_path = os.path.join(upl_dir, 'SmartMicSession.upl')
+        upl_path = os.path.join(upl_dir, args.playlist_name)
         # Truncate/create the file
         with open(upl_path, 'w', encoding='utf-8') as fh:
             fh.truncate(0)
-        logger.info('Initialized SmartMicSession.upl at %s', upl_path)
+        logger.info('Initialized playlist at %s', upl_path)
     except Exception:
-        logger.exception('Failed to create/truncate SmartMicSession.upl')
+        logger.exception('Failed to create/truncate playlist file')
 
-    # Set the port to 5000 or any other port you prefer
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False, ssl_context=("../../fullchain.pem", "../../privkey.pem"))
+    # Set the port from command line argument
+    port = args.port
+    
+    # Remap SSL port if requested
+    if args.remap_ssl_port:
+        remap_ssl_port()
+
+    # Optionally run UltraStar Deluxe after server startup
+    if args.run_usdx:
+        print("Launching UltraStar Deluxe...")
+        try:
+            exe_path = os.path.abspath(os.path.join(args.usdx_dir, "ultrastardx"))
+            cwd_path = os.path.abspath(args.usdx_dir)
+            subprocess.Popen([exe_path], cwd=cwd_path)
+            print("UltraStar Deluxe launched.")
+        except Exception as e:
+            print("Failed to launch UltraStar Deluxe:", e)
+
+    # SSL context handling
+    ssl_context = None
+    if args.ssl:
+        if args.chain and args.key:
+            ssl_context = (args.chain, args.key)
+    if ssl_context:
+        print(f"Starting SmartMicrophone server with SSL on port {port}...")
+        if port == 443:
+            print(f"Access the server at: https://<server-ip>/")
+        else:
+            print(f"Access the server at: https://<server-ip>:{port}/")
+        app.run(host='0.0.0.0', port=port, debug=args.debug, use_reloader=False, ssl_context=ssl_context)
+    else:
+        app.run(host='0.0.0.0', port=port, debug=args.debug, use_reloader=False)

@@ -59,7 +59,7 @@ class WebRTCMicrophone:
 
         logger.debug(f"{self.player_id}: Starting new webrtc-cli process")
         self.proc = subprocess.Popen([
-            '../webrtc-cli/webrtc-cli',
+            './webrtc-cli/webrtc-cli',
             '--answer',
             '--sink', 'smartphone-mic-0-sink',
             '--mode', 'lowdelay',
