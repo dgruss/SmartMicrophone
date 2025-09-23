@@ -960,46 +960,18 @@ def songs_preview():
 
 
 def signal_handler(signum, frame):
-    print(f"Received signal {signum}, shutting down gracefully...")
+    logger.info("Received signal %d, shutting down gracefully...", signum)
     WebRTCMicrophoneManager().stop()
-    print("All microphones stopped. Exiting now.")
-    # Cleanup iptables entries for port remapping if they were created
-    if 'args' in globals() and getattr(args, 'remap_ssl_port', False):
-      print("Cleaning up iptables port remapping rules...")
-      try:
-        ip_list = []
-        for iface in socket.if_nameindex():
-          name = iface[1]
-          try:
-            for fam, _, _, _, sockaddr in socket.getaddrinfo(name, None):
-              if fam == socket.AF_INET:
-                ip = sockaddr[0]
-                if ip != "0.0.0.0" and ip != "127.0.0.1" and ip not in ip_list:
-                  ip_list.append(ip)
-          except Exception:
-            continue
-        for ip in ip_list:
-          del_cmd = [
-            "sudo", "iptables", "-t", "nat", "-D", "PREROUTING",
-            "-p", "tcp", "-d", ip, "--dport", "443",
-            "-j", "REDIRECT", "--to-port", str(args.port)
-          ]
-          print("Removing:", " ".join(del_cmd))
-          result = subprocess.run(del_cmd, capture_output=True, text=True)
-          if result.returncode == 0:
-            print(f"Removed iptables rule for {ip}:443 -> {args.port}")
-          else:
-            print(f"Failed to remove rule for {ip}: {result.stderr}")
-      except Exception as e:
-        print("Error cleaning up iptables rules:", e)
-    #time.sleep(0.1)  # Give some time for cleanup
-    raise RuntimeError("Server going down")
+    print("Terminating server...")
+    sys.exit(0)
 
 def initialize_record_section():
+    """Initialize the [Record] section in config.ini for 6 virtual sinks."""
+    print("Initializing [Record] section in config.ini for 6 virtual sinks...")
     base_dir = os.path.dirname(__file__)
     cfg_path = os.path.realpath(os.path.join(base_dir, args.usdx_dir, 'config.ini'))
     if not os.path.exists(cfg_path):
-        print(f"Config path not found: {cfg_path}")
+        logger.error(f"Config path not found: {cfg_path}")
         sys.exit(1)
     cp = NoSpaceConfigParser()
     cp.optionxform = str
@@ -1013,8 +985,8 @@ def initialize_record_section():
     for k in keys_to_remove:
         cp.remove_option('Record', k)
     # Add 6 virtual sinks
-    for i in range(1, 7):
-        cp['Record'][f'DeviceName[{i}]'] = f'smartphone-mic-{i-1}-sink Audio/Source/Virtual sink'
+    for i in range(1, 6):
+        cp['Record'][f'DeviceName[{i}]'] = f'smartphone-mic-{i}-sink Audio/Source/Virtual sink'
         cp['Record'][f'Input[{i}]'] = '0'
         cp['Record'][f'Latency[{i}]'] = '-1'
         cp['Record'][f'Channel1[{i}]'] = str(i)
@@ -1023,11 +995,11 @@ def initialize_record_section():
     with open(tmp_path, 'w', encoding='utf-8') as fh:
         cp.write(fh)
     os.replace(tmp_path, cfg_path)
-    print(f"[Record] section in config.ini initialized for 6 virtual sinks.")
+    logger.info("[Record] section in config.ini initialized for 6 virtual sinks.")
 
 def setup_domain_hotspot_mapping(domain):
+    print(f"Setting up domain '{domain}' to map to Wi-Fi hotspot IP addresses...")
     CONF_PATH = "/etc/NetworkManager/dnsmasq-shared.d/usdx.conf"
-    print("Detecting Wi-Fi hotspots...")
     try:
         iw_result = subprocess.run(["iw", "dev"], capture_output=True, text=True)
         hotspots = []
@@ -1039,7 +1011,7 @@ def setup_domain_hotspot_mapping(domain):
                 hotspots.append(iface)
                 iface = None
         if not hotspots:
-            print("No Wi-Fi hotspot found.")
+            logger.info("No Wi-Fi hotspot found.")
         for IFACE in hotspots:
             ip_result = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", IFACE], capture_output=True, text=True)
             ip = None
@@ -1048,11 +1020,11 @@ def setup_domain_hotspot_mapping(domain):
                     ip = part.split("/")[0]
                     break
             if not ip:
-                print(f"Could not determine IP address for {IFACE}. Skipping.")
+                logger.info(f"Could not determine IP address for {IFACE}. Skipping.")
                 continue
-            print(f"Hotspot device: {IFACE}")
-            print(f"IP address: {ip}")
-            print("----")
+            logger.info(f"Hotspot device: {IFACE}")
+            logger.info(f"IP address: {ip}")
+            logger.info("----")
             # Prepare new config content
             new_content = f"address=/{domain}/{ip}\nlocal-ttl=86400\n"
             # Read current config if exists
@@ -1068,33 +1040,33 @@ def setup_domain_hotspot_mapping(domain):
                 # Backup config with sudo
                 if os.path.exists(CONF_PATH):
                     subprocess.run(["sudo", "cp", CONF_PATH, CONF_PATH + ".bak"])
-                    print(f"Backed up {CONF_PATH} to {CONF_PATH}.bak")
+                    logger.info(f"Backed up {CONF_PATH} to {CONF_PATH}.bak")
                 # Write new config with sudo tee
                 proc = subprocess.run(["echo", new_content], capture_output=True, text=True)
                 tee_proc = subprocess.run(["sudo", "tee", CONF_PATH], input=proc.stdout, text=True, capture_output=True)
                 if tee_proc.returncode != 0:
-                    print(f"Failed to write {CONF_PATH}: {tee_proc.stderr}")
+                    logger.error(f"Failed to write {CONF_PATH}: {tee_proc.stderr}")
                     sys.exit(1)
                 # Set world-readable permissions
                 subprocess.run(["sudo", "chmod", "644", CONF_PATH])
-                print(f"Updated {CONF_PATH}:")
-                print(new_content)
+                logger.info(f"Updated {CONF_PATH}:")
+                logger.info(new_content)
                 # Restart NetworkManager
-                print("Restarting NetworkManager to apply changes...")
+                logger.info("Restarting NetworkManager to apply changes...")
                 result = subprocess.run(["sudo", "systemctl", "restart", "NetworkManager"])
                 if result.returncode == 0:
-                    print("NetworkManager restarted successfully.")
+                    logger.info("NetworkManager restarted successfully.")
                 else:
-                    print("Failed to restart NetworkManager. Please check manually.")
+                    logger.error("Failed to restart NetworkManager. Please check manually.")
             else:
-                print(f"No changes needed for {CONF_PATH}.")
-        print("All done!")
+                logger.info(f"No changes needed for {CONF_PATH}.")
+        logger.info("All done!")
     except Exception as e:
-        print("Error during domain setup:", e, file=sys.stderr)
+        logger.error("Error during domain setup:", e)
         sys.exit(1)
 
 def remap_ssl_port():
-    print("Remapping port 443 to port", args.port, "using iptables...")
+    print("Remapping port 443 to", args.port, "using iptables...")
     try:
         # Use 'ip -4 -o addr show' to get all IPv4 addresses
         ip_list = []
@@ -1112,43 +1084,29 @@ def remap_ssl_port():
                         continue
                     ip_list.append(ip)
         if not ip_list:
-            print("No valid global IPv4 addresses found for remapping.")
+            logger.info("No valid global IPv4 addresses found for remapping.")
         for ip in ip_list:
             # Check if rule already exists
             check_cmd = ["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
             check_result = subprocess.run(check_cmd, capture_output=True, text=True)
             if check_result.returncode == 0:
-                print(f"Rule for {ip}:443 -> {args.port} already exists, skipping.")
+                logger.info(f"Rule for {ip}:443 -> {args.port} already exists, skipping.")
                 continue
             cmd = ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
-            print("Running:", " ".join(cmd))
+            logger.info("Running: %s", " ".join(cmd))
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
-                print(f"Remapped 443 to {args.port} for {ip}")
+                logger.info("Remapped 443 to %d for %s", args.port, ip)
             else:
-                print(f"Failed to remap for {ip}: {result.stderr}")
+                logger.error("Failed to remap for %s: %s", ip, result.stderr)
     except Exception as e:
-        print("Error remapping SSL port:", e)
+        logger.error("Error remapping SSL port: %s", e)
 
 def handle_start_hotspot(hotspot_name):
     if not hotspot_name:
         return
-    status = subprocess.run(["nmcli", "c", "show", hotspot_name], capture_output=True, text=True)
-    if status.returncode == 0:
-        for line in status.stdout.splitlines():
-            if line.strip().startswith("ipv4.addresses:"):
-                ip = line.split(":", 1)[1].strip()
-                if ip and ip != '--':
-                    print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
-                    return
-    print(f"Bringing up hotspot '{hotspot_name}' with nmcli...")
-    result = subprocess.run(["nmcli", "c", "up", hotspot_name], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Failed to start hotspot '{hotspot_name}': {result.stderr}")
-        sys.exit(1)
-    print(f"Hotspot '{hotspot_name}' activation requested. Waiting for it to have an IP address...")
-    # Wait for the hotspot to be up and have an IP address
-    for _ in range(20):
+    waiting = 0
+    while waiting < 30:
         status = subprocess.run(["nmcli", "c", "show", hotspot_name], capture_output=True, text=True)
         if status.returncode == 0:
             for line in status.stdout.splitlines():
@@ -1157,9 +1115,47 @@ def handle_start_hotspot(hotspot_name):
                     if ip and ip != '--':
                         print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
                         return
-        time.sleep(1)
-    print(f"Timeout waiting for hotspot '{hotspot_name}' to have an IP address.")
+        elif waiting == 0:
+          logger.info(f"Bringing up hotspot '{hotspot_name}' with nmcli...")
+          result = subprocess.run(["nmcli", "c", "up", hotspot_name], capture_output=True, text=True)
+          waiting = 1
+          if result.returncode != 0:
+              logger.error(f"Failed to start hotspot '{hotspot_name}': {result.stderr}")
+              sys.exit(1)
+        else:
+            logger.info(f"Waiting for an IP address...")
+            waiting += 1
+            time.sleep(1)
+    logger.error(f"Timeout waiting for hotspot '{hotspot_name}' to have an IP address.")
     sys.exit(1)
+
+def setup_iptables_forwarding(internet_device, hotspot_device):
+    print(f"Setting up forwarding from internet={internet_device} to hotspot={hotspot_device}")
+    rules = [
+        {
+            "check": ["sudo", "iptables", "-t", "nat", "-C", "POSTROUTING", "-o", hotspot_device, "-j", "MASQUERADE"],
+            "add":   ["sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", hotspot_device, "-j", "MASQUERADE"]
+        },
+        {
+            "check": ["sudo", "iptables", "-C", "FORWARD", "-i", hotspot_device, "-o", internet_device, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+            "add":   ["sudo", "iptables", "-A", "FORWARD", "-i", hotspot_device, "-o", internet_device, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]
+        },
+        {
+            "check": ["sudo", "iptables", "-C", "FORWARD", "-i", internet_device, "-o", hotspot_device, "-j", "ACCEPT"],
+            "add":   ["sudo", "iptables", "-A", "FORWARD", "-i", internet_device, "-o", hotspot_device, "-j", "ACCEPT"]
+        }
+    ]
+    for rule in rules:
+        logger.info("Checking: %s", " ".join(rule["check"]))
+        check_result = subprocess.run(rule["check"], capture_output=True, text=True)
+        if check_result.returncode == 0:
+            logger.info("Rule already exists: %s", " ".join(rule['add']))
+            continue
+        add_result = subprocess.run(rule["add"], capture_output=True, text=True)
+        if add_result.returncode == 0:
+            logger.info("Added rule: %s", " ".join(rule["add"]))
+        else:
+            logger.error("Failed to add rule: %s\n%s", " ".join(rule["add"]), add_result.stderr)
 
 
 if __name__ == '__main__':
@@ -1169,12 +1165,14 @@ if __name__ == '__main__':
     # Networking & Security
     net_group = parser.add_argument_group('Networking & Security')
     net_group.add_argument('--start-hotspot', type=str, default='', help='Start the given hotspot using nmcli before domain setup')
+    net_group.add_argument('--internet-device', type=str, default='', help='Network interface providing internet connectivity (e.g., wlan0)')
+    net_group.add_argument('--hotspot-device', type=str, default='', help='Network interface for the hotspot (e.g., wlan1)')
     net_group.add_argument('--ssl', action='store_true', help='Enable SSL (requires --chain and --key)')
     net_group.add_argument('--chain', type=str, default=None, help='SSL chain/cert file (fullchain.pem or cert.pem)')
     net_group.add_argument('--key', type=str, default=None, help='SSL private key file (privkey.pem)')
     net_group.add_argument('--port', type=int, default=5000, help='Port to run the server on (default: 5000)')
     net_group.add_argument('--remap-ssl-port', action='store_true', help='Remap ports so that users can access the server on the default HTTPS port. Invokes iptables and sudo!')
-    net_group.add_argument('--domain', type=str, default='', help='Setup a domain to hotspot IP mapping via NetworkManager/dnsmasq, requires sudo')
+    net_group.add_argument('--domain', type=str, default='localhost', help='Setup a domain to hotspot IP mapping via NetworkManager/dnsmasq, requires sudo')
 
     # UltraStar Deluxe Integration
     usdx_group = parser.add_argument_group('UltraStar Deluxe Integration')
@@ -1194,13 +1192,17 @@ if __name__ == '__main__':
 
     logging.basicConfig(filename='virtual-microphone.log', level=logging.INFO if not args.debug else logging.DEBUG)
 
+    # Run iptables forwarding if both devices are provided
+    if args.internet_device and args.hotspot_device:
+        setup_iptables_forwarding(args.internet_device, args.hotspot_device)
+
     if args.start_hotspot:
         handle_start_hotspot(args.start_hotspot)
 
     if args.set_inputs:
         initialize_record_section()
 
-    if args.domain != '':
+    if args.domain != 'localhost':
         setup_domain_hotspot_mapping(args.domain)
 
     WebRTCMicrophoneManager()
@@ -1265,6 +1267,7 @@ if __name__ == '__main__':
 
     # Build/update song index at startup
     try:
+        print("Scanning songs and building index...")
         scan_songs_and_build_index(find_root=args.usdx_dir)
     except Exception:
         logger.exception('Error scanning songs at startup')
@@ -1278,7 +1281,7 @@ if __name__ == '__main__':
         # Truncate/create the file
         with open(upl_path, 'w', encoding='utf-8') as fh:
             fh.truncate(0)
-        logger.info('Initialized playlist at %s', upl_path)
+        print(f'Initialized playlist {upl_path}')
     except Exception:
         logger.exception('Failed to create/truncate playlist file')
 
@@ -1296,21 +1299,23 @@ if __name__ == '__main__':
             exe_path = os.path.abspath(os.path.join(args.usdx_dir, "ultrastardx"))
             cwd_path = os.path.abspath(args.usdx_dir)
             subprocess.Popen([exe_path], cwd=cwd_path)
-            print("UltraStar Deluxe launched.")
+            logger.info("UltraStar Deluxe launched.")
         except Exception as e:
-            print("Failed to launch UltraStar Deluxe:", e)
+            logger.error("Failed to launch UltraStar Deluxe: %s", e)
 
     # SSL context handling
     ssl_context = None
     if args.ssl:
         if args.chain and args.key:
             ssl_context = (args.chain, args.key)
+    
     if ssl_context:
-        print(f"Starting SmartMicrophone server with SSL on port {port}...")
-        if port == 443:
-            print(f"Access the server at: https://<server-ip>/")
+        logger.info("Starting SmartMicrophone server with SSL on port %d...", port)
+        if port == 443 or args.remap_ssl_port:
+            print(f"Access the server at: https://{args.domain}/")
         else:
-            print(f"Access the server at: https://<server-ip>:{port}/")
+            print(f"Access the server at: https://{args.domain}:{port}/")
         app.run(host='0.0.0.0', port=port, debug=args.debug, use_reloader=False, ssl_context=ssl_context)
     else:
         app.run(host='0.0.0.0', port=port, debug=args.debug, use_reloader=False)
+        print(f"Access the server at: https://{args.domain}:{port}/")
