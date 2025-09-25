@@ -1110,7 +1110,7 @@ def handle_start_hotspot(hotspot_name):
         status = subprocess.run(["nmcli", "c", "show", hotspot_name], capture_output=True, text=True)
         if status.returncode == 0:
             for line in status.stdout.splitlines():
-                if line.strip().startswith("ipv4.addresses:"):
+                if line.strip().startswith("IP4.ADDRESS"):
                     ip = line.split(":", 1)[1].strip()
                     if ip and ip != '--':
                         print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
@@ -1185,12 +1185,23 @@ if __name__ == '__main__':
     # Server Options
     server_group = parser.add_argument_group('Server Options')
     server_group.add_argument('--debug', action='store_true', help='Enable debug mode')
+    server_group.add_argument('--skip-scan-songs', action='store_true', help='Skip scanning songs and building songs_index.json at startup')
 
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.basicConfig(filename='virtual-microphone.log', level=logging.INFO if not args.debug else logging.DEBUG)
+    # Truncate the logfile on startup so each run starts fresh
+    try:
+        logfile_path = os.path.join(os.path.dirname(__file__), 'virtual-microphone.log')
+        # Open in write mode to truncate or create the file
+        with open(logfile_path, 'w', encoding='utf-8'):
+            pass
+    except Exception:
+        # If truncation fails, continue and let logging create/append as fallback
+        pass
+
+    logging.basicConfig(filename=logfile_path, level=logging.INFO if not args.debug else logging.DEBUG)
 
     # Run iptables forwarding if both devices are provided
     if args.internet_device and args.hotspot_device:
@@ -1265,12 +1276,15 @@ if __name__ == '__main__':
     except Exception:
         logger.exception('Failed to start stale cleanup thread')
 
-    # Build/update song index at startup
-    try:
-        print("Scanning songs and building index...")
-        scan_songs_and_build_index(find_root=args.usdx_dir)
-    except Exception:
-        logger.exception('Error scanning songs at startup')
+    # Build/update song index at startup (can be skipped with --skip-scan-songs)
+    if not getattr(args, 'skip_scan_songs', False):
+        try:
+            print("Scanning songs and building index...")
+            scan_songs_and_build_index(find_root=args.usdx_dir)
+        except Exception:
+            logger.exception('Error scanning songs at startup')
+    else:
+        logger.info('Skipping songs scan at startup (--skip-scan-songs)')
 
     # Ensure playlist file exists and is truncated at startup
     try:
