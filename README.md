@@ -86,6 +86,7 @@ Some options perform operations that require `sudo` permission. However, SmartMi
 | `--run-usdx` | Run UltraStar Deluxe after server startup |
 | `--audio-format <ext>` | Audio format of songs in UltraStar Deluxe (default: m4a) |
 | `--set-inputs` | Initialize [Record] section in config.ini for 6 virtual sinks |
+| `--skip-scan-songs` | Skips the song scan to speed up the server start |
 
 #### Server Options
 | Option | Description |
