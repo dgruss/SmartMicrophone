@@ -1115,7 +1115,7 @@ def handle_start_hotspot(hotspot_name):
                     if ip and ip != '--':
                         print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
                         return
-        elif waiting == 0:
+        if waiting == 0:
           logger.info(f"Bringing up hotspot '{hotspot_name}' with nmcli...")
           result = subprocess.run(["nmcli", "c", "up", hotspot_name], capture_output=True, text=True)
           waiting = 1
