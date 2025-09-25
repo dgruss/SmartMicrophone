@@ -16,6 +16,9 @@ SmartMicrophone is a modern, open-source web-based microphone and remote control
 
 ---
 
+## Bugs
+- **No iPhone Support:** for some reason webrtc-cli does not like webrtc streams from iphones. Currently Android and Linux clients work.
+
 ## Installation
 git clone https://github.com/dgruss/SmartMicrophone.git
 ### Supported OS: Ubuntu/Debian (recommended)
