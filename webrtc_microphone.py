@@ -2,6 +2,8 @@ import subprocess
 import time
 import logging
 import re
+import os
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -35,106 +37,175 @@ class WebRTCMicrophone:
         self.player_id = player_id
         self.proc = None
         self.started_at = None
-        # webrtc-cli will create playback ports; we record discovered pw port ids here
+        # pulse-receive will create playback ports; we record discovered pw port ids here
         self.pw_ports = {}  # e.g. {'FL': 133, 'FR': 132}
-        # legacy sink_name kept for compatibility with older code paths
-        self.sink_name = f"smartphone-mic-src-{player_id}-sink"
-        logger.info(f"{self.player_id}: WebRTCMicrophone initialized.")
+        self.link_name = f"pulse-receive-{player_id}"
+        logger.debug(f"{self.player_id}: WebRTCMicrophone initialized.")
 
     def start(self, offer):
-        logger.info(f"{self.player_id}: Starting WebRTC microphone with offer")
+        logger.debug(f"{self.player_id}: Starting WebRTC microphone with offer")
         return self.__start_new_process(offer)
 
     def stop(self):
-        logger.info(f"{self.player_id}: Stopping WebRTC microphone.")
+        logger.debug(f"{self.player_id}: Stopping WebRTC microphone.")
         self.__stop_webrtc_process()
+
 
     def __start_new_process(self, offer):
         if not offer:
             logger.error(f"{self.player_id}: Offer must not be empty")
             return {'success': False, 'error': 'Offer must not be empty'}
 
-        # Capture existing pw port ids so we can detect the new ports created by this process
-        existing_ports = self._list_pw_port_ids()
+        logger.debug(f"{self.player_id}: Starting new pulse-receive process via compiled binary")
 
-        logger.debug(f"{self.player_id}: Starting new webrtc-cli process")
-        self.proc = subprocess.Popen([
-            './webrtc-cli/webrtc-cli',
-            '--answer',
-            '--sink', 'smartphone-mic-0-sink',
-            '--mode', 'lowdelay',
-            '--rate', '48000',
+        binary_path = './pulse-receive/pulse-receive'
+        if not os.path.exists(binary_path) or not os.access(binary_path, os.X_OK):
+            logger.error(f"{self.player_id}: pulse-receive binary not found or not executable at {binary_path}")
+            return {'success': False, 'error': f'pulse-receive binary not available: {binary_path}'}
+
+        launch_cmd = [
+            binary_path,
             '--pulse-buf', '20ms',
-            '--sink-frame', '20ms',
-            '--jitter-buf', '20ms',
-            '--max-drift', '0ms',
-            '--chans', '2'
-        ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=2
-        )
+            '--link-name', self.link_name
+        ]
+        logger.debug(f"{self.player_id}: Launching pulse-receive with command: {' '.join(launch_cmd)}")
 
-        time.sleep(0.1)
-        check_result = self.__check_webrtc_process()
-        if not check_result['success']:
-            return check_result
-
-        logger.info(f"{self.player_id}: Started webrtc-cli process")
-        self.started_at = time.time()
-
-        # Pipe the offer into the process
         try:
-            self.proc.stdin.write(offer)
+            self.proc = subprocess.Popen(
+                launch_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=2
+            )
+        except Exception as e:
+            logger.exception(f"{self.player_id}: Failed to start pulse-receive process: {e}")
+            self.proc = None
+            return {'success': False, 'error': f'Failed to start pulse-receive: {e}'}
+
+        self.started_at = time.time()
+        # Record existing PipeWire ports before pulse-receive creates new ones
+        try:
+            existing_ports = self._list_pw_port_ids()
+        except Exception:
+            existing_ports = set()
+
+
+
+        # Encode offer as base64-encoded JSON as required by pulse-receive
+        import json, base64
+        offer_obj = {"sdp": offer, "type": "offer"}
+        offer_json = json.dumps(offer_obj)
+        offer_b64 = base64.b64encode(offer_json.encode()).decode()
+
+        # Write offer to session log directory as soon as possible and print to stdout
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            logs_root = os.path.join(base_dir, 'logs')
+            session_dir = os.path.join(logs_root, f'session_{self.player_id}')
+            os.makedirs(session_dir, exist_ok=True)
+            with open(os.path.join(session_dir, 'client.offer.sdp'), 'w') as f:
+                f.write(offer)
+            logger.debug(f"[OFFER] session_{self.player_id} client.offer.sdp:\n{offer}\n")
+        except Exception as e:
+            logger.error(f"{self.player_id}: Failed to write client.offer.sdp: {e}")
+
+        try:
+            self.proc.stdin.write(offer_b64 + "\n")
             self.proc.stdin.flush()
             self.proc.stdin.close()
         except Exception:
-            logger.exception(f"{self.player_id}: Failed to send offer to webrtc-cli")
+            logger.exception(f"{self.player_id}: Failed to send offer to pulse-receive")
+            return {'success': False, 'error': 'Failed to send offer to pulse-receive'}
 
-        time.sleep(0.1)
-        check_result = self.__check_webrtc_process()
-        if not check_result['success']:
-            return check_result
+        # Read answer from the process
+        if not self.proc or not self.proc.stdout:
+            logger.error(f"{self.player_id}: pulse-receive process not started correctly (no stdout)")
+            return {'success': False, 'error': 'pulse-receive process not started correctly'}
 
-        # read answer from the process
-        answer_lines = []
-        got_full_answer = False
-        while not got_full_answer:
-            line = self.proc.stdout.readline()
-            if not line:
-                time.sleep(0.1)
-                continue
-            answer_lines.append(line)
-            if 'a=end-of-candidates' in line:
-                got_full_answer = True
-        answer = ''.join(answer_lines)
-        logger.info(f"{self.player_id}: Received answer from webrtc-cli process")
 
-        # Discover pw port ids created by this webrtc-cli instance (new ports since we started)
-        time.sleep(0.1)
-        new_ports = self._list_pw_ports(detail=True)
-        created = {pid: name for pid, name in new_ports.items() if pid not in existing_ports}
-        if created:
-            # Map to channels (e.g., output_FL -> FL)
-            mapping = {}
-            for pid, name in created.items():
-                lname = name.lower()
-                if 'output_fl' in lname or 'playback_fl' in lname or lname.endswith('_fl'):
-                    mapping['FL'] = int(pid)
-                elif 'output_fr' in lname or 'playback_fr' in lname or lname.endswith('_fr'):
-                    mapping['FR'] = int(pid)
-                else:
-                    mapping.setdefault('OTHER', []).append(int(pid))
-            self.pw_ports = mapping
-            logger.info(f"{self.player_id}: Discovered pw ports: {self.pw_ports}")
-        else:
-            logger.warning(f"{self.player_id}: No new pw ports detected for webrtc-cli; pw-link may not find this session")
-        return {'success': True, 'answer': answer, 'player_id': self.player_id}
+        # Read and decode the base64-encoded JSON answer from pulse-receive
+        import threading
+        answer_b64 = ''
+        answer = ''
+        expect_b64 = False
+        b64_buffer = []
+        session_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', f'session_{self.player_id}')
+
+        # Helper to print all lines from a stream with a prefix
+        def _print_stream_lines(stream, prefix):
+            try:
+                for line in iter(stream.readline, ''):
+                    if not line:
+                        break
+                    logger.debug(f"[{prefix}][session_{self.player_id}] {line.rstrip()}")
+            except Exception as e:
+                logger.error(f"[{prefix}][session_{self.player_id}] <error reading stream>: {e}")
+
+        # Start background thread to print stderr
+        if self.proc and self.proc.stderr:
+            threading.Thread(target=_print_stream_lines, args=(self.proc.stderr, 'GST-STDERR'), daemon=True).start()
+
+        try:
+            while True:
+                line = self.proc.stdout.readline()
+                if not line:
+                    time.sleep(0.1)
+                    continue
+                stripped = line.strip()
+                logger.debug(f"[GST-STDOUT][session_{self.player_id}] {line.rstrip()}")
+
+                if 'Connection State has changed checking' in stripped:
+                    expect_b64 = True
+                    b64_buffer = []
+                    continue
+
+                if expect_b64 and stripped:
+                    b64_buffer.append(stripped)
+                    candidate = ''.join(b64_buffer)
+                    try:
+                        answer_json = base64.b64decode(candidate).decode()
+                        answer_obj = json.loads(answer_json)
+                        answer_b64 = candidate
+                        answer = answer_obj.get('sdp', '')
+                        logger.info(f"{self.player_id}: Received answer from pulse-receive process")
+                        # Write answer and answer_b64 as soon as available and print to stdout
+                        try:
+                            with open(os.path.join(session_dir, 'server.answer.sdp'), 'w') as f:
+                                f.write(answer)
+                            logger.debug(f"[ANSWER] session_{self.player_id} server.answer.sdp:\n{answer}\n")
+                        except Exception as e:
+                            logger.error(f"{self.player_id}: Failed to write server.answer.sdp: {e}")
+                        try:
+                            with open(os.path.join(session_dir, 'server.answer.b64.sdp'), 'w') as f:
+                                f.write(answer_b64)
+                            logger.debug(f"[ANSWER_B64] session_{self.player_id} server.answer.b64.sdp:\n{answer_b64}\n"  )
+                        except Exception as e:
+                            logger.error(f"{self.player_id}: Failed to write server.answer.b64.sdp: {e}")
+                        try:
+                            with open(os.path.join(session_dir, 'server.answer.decoded.sdp'), 'w') as f:
+                                f.write(answer)
+                        except Exception as e:
+                            logger.error(f"{self.player_id}: Failed to write server.answer.decoded.sdp: {e}")
+                        break
+                    except Exception:
+                        # Keep buffering if more base64 fragments follow
+                        continue
+        except Exception:
+            logger.exception(f"{self.player_id}: Error reading answer from pulse-receive")
+            answer = ''
+
+        # Kick off asynchronous post-start tasks (discover pw ports) so we can return success immediately.
+        try:
+            threading.Thread(target=self._post_startup_tasks, args=(existing_ports,), daemon=True).start()
+        except Exception:
+            logger.exception(f"{self.player_id}: Failed to start post-startup thread")
+
+        return {'success': True, 'answer': answer, 'answer_b64': answer_b64, 'player_id': self.player_id}
 
     def is_process_alive(self):
-        """Return True if the underlying webrtc-cli process appears alive.
+        """Return True if the underlying pulse-receive process appears alive.
 
         Checks both the subprocess state and whether the discovered PipeWire ports still exist
         (if we recorded them). This is a best-effort liveness check used by the manager monitor.
@@ -192,8 +263,10 @@ class WebRTCMicrophone:
         try:
             proc = subprocess.run(['pw-link', '-I', '-o'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             out = proc.stdout
+            link_name = getattr(self, 'link_name', 'pulse-receive')
+            pattern = re.compile(r'^\s*(\d+)\s+' + re.escape(link_name) + r'(.*)$', re.IGNORECASE)
             for line in out.splitlines():
-                m = re.match(r'^\s*(\d+)\s+webrtc-cli(.+)$', line)
+                m = pattern.match(line)
                 if m:
                     pid = int(m.group(1))
                     name = m.group(2).strip()
@@ -205,9 +278,66 @@ class WebRTCMicrophone:
     def _list_pw_port_ids(self):
         return set(self._list_pw_ports(detail=True).keys())
 
+    def _post_startup_tasks(self, existing_ports):
+        """Run after starting pulse-receive in a background thread.
+
+        Discovers PipeWire ports created by this pulse-receive instance and
+        updates self.pw_ports. This mirrors the previous blocking logic but
+        runs asynchronously so start() can return immediately.
+        """
+        try:
+            # initial delay to allow pulse-receive to enumerate ports
+            attempts = 300
+            new_ports = {}
+            for attempt in range(attempts):
+                try:
+                    new_ports = self._list_pw_ports(detail=True)
+                except Exception:
+                    new_ports = {}
+                logger.debug(f"{self.player_id}: Post-start attempt {attempt+1}/{attempts}, pw ports: {new_ports}")
+                # if we got any ports, break early
+                if new_ports:
+                    break
+                time.sleep(0.05)
+
+            # print existing ports and new ports for debugging
+            logger.debug(f"{self.player_id}: Existing ports: {existing_ports}")
+            logger.debug(f"{self.player_id}: New ports: {new_ports}")
+            created = {pid: name for pid, name in (new_ports or {}).items() if pid not in (existing_ports or set())}
+            if created:
+                # Map to channels (e.g., output_FL -> FL)
+                mapping = {}
+                for pid, name in created.items():
+                    try:
+                        lname = name.lower()
+                        if 'output_fl' in lname or 'playback_fl' in lname or lname.endswith('_fl'):
+                            mapping['FL'] = int(pid)
+                        elif 'output_fr' in lname or 'playback_fr' in lname or lname.endswith('_fr'):
+                            mapping['FR'] = int(pid)
+                        else:
+                            mapping.setdefault('OTHER', []).append(int(pid))
+                    except Exception:
+                        logger.exception(f"{self.player_id}: Error mapping pw port {pid} -> {name}")
+                self.pw_ports = mapping
+                logger.debug(f"{self.player_id}: Discovered pw ports: {self.pw_ports}")
+            else:
+                logger.warning(f"{self.player_id}: No new pw ports detected for pulse-receive; pw-link may not find this session")
+        except Exception:
+            logger.exception(f"{self.player_id}: Exception in post-startup tasks")
+        # Attempt to auto-connect this microphone to sink 0 via the manager singleton.
+        try:
+            mgr = WebRTCMicrophoneManager()
+            res = mgr.connect_microphone_to_sink(self.player_id, 0)
+            if not res or not res.get('success'):
+                logger.warning(f"{self.player_id}: Auto-connect to sink 0 failed: {res.get('error') if isinstance(res, dict) else res}")
+            else:
+                logger.info(f"{self.player_id}: Auto-connected to sink 0")
+        except Exception:
+            logger.exception(f"{self.player_id}: Exception while auto-connecting microphone to sink")
+
     def __check_webrtc_process(self):
         if self.proc.poll() is not None:
-            logger.error(f"{self.player_id}: webrtc-cli failed to start: {self.proc.poll()}")
+            logger.error(f"{self.player_id}: pulse-receive failed to start: {self.proc.poll()}")
             lines = []
             while True:
                 line = self.proc.stdout.readline()
@@ -225,41 +355,6 @@ class WebRTCMicrophone:
             return {'success': False, 'error': f"WebRTC process failed to start:\n {''.join(answer_lines)}"}
         return {'success': True}
 
-    def __create_null_sink(self):
-        # Create per-player null-sink if not exists
-        try:
-            result = subprocess.run([
-                'pactl', 'list', 'short', 'sinks'
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if self.sink_name not in result.stdout:
-                logger.info(f"Creating null-sink '{self.sink_name}' for player {self.player_id}")
-                create_result = subprocess.run([
-                    'pactl', 'load-module', 'module-null-sink', 'media.class=Audio/Source/Virtual', f'sink_name={self.sink_name}', 'channel_map=front-left,front-right'
-                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                if create_result.returncode != 0:
-                    logger.error(f"Failed to create null-sink: {create_result.stderr.strip()}")
-        except Exception as e:
-            logger.error(f"Error creating null-sink: {e}")
-
-    def __remove_null_sink(self):
-        # Remove per-player null-sink
-        try:
-            # Find module id for this sink
-            result = subprocess.run([
-                'pactl', 'list', 'short', 'modules'
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            for line in result.stdout.splitlines():
-                if f'sink_name={self.sink_name}' in line:
-                    module_id = line.split()[0]
-                    subprocess.run(['pactl', 'unload-module', module_id])
-                    logger.info(f"Unloaded null-sink module {module_id} for player {self.player_id}")
-        except Exception as e:
-            logger.error(f"Error removing null-sink: {e}")
-
-    def get_monitor_source(self):
-        # Returns the monitor source name for this player's null-sink
-        return f"{self.sink_name}.monitor"
-
     def get_state(self):
         if self.proc is None:
             return 'none'
@@ -275,7 +370,7 @@ class WebRTCMicrophone:
         return state
 
     def __del__(self):
-        logger.info(f"{self.player_id}: Cleaning up WebRTCMicrophone resources.")
+        logger.debug(f"{self.player_id}: Cleaning up WebRTCMicrophone resources.")
         self.stop()
 
 
@@ -306,11 +401,11 @@ class WebRTCMicrophoneManager:
         self.microphones = {}  # player_id -> WebRTCMicrophone instance
         self.source_connections = {}  # player_id -> sink_index
         self._source_lock = threading.Lock()
-        # queue to serialize starting webrtc-cli processes to avoid pw-link races
+        # queue to serialize starting pulse-receive processes to avoid pw-link races
         self._start_queue = []  # list of player_id in FIFO order
         self._start_cond = threading.Condition()
         self.ensure_default_sinks()
-        # start background monitor thread to detect dead webrtc-cli processes
+        # start background monitor thread to detect dead pulse-receive processes
         try:
             self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self._monitor_thread.start()
@@ -365,7 +460,7 @@ class WebRTCMicrophoneManager:
                     check=True
                 )
                 if sink_name not in result.stdout:
-                    logger.info(f"Creating virtual microphone sink '{sink_name}' (index {i})")
+                    logger.debug(f"Creating virtual microphone sink '{sink_name}' (index {i})")
                     create_result = subprocess.run(
                         ['pactl', 'load-module', 'module-null-sink', 'media.class=Audio/Source/Virtual', f'sink_name={sink_name}', 'channel_map=front-left,front-right'],
                         stdout=subprocess.PIPE,
@@ -376,7 +471,7 @@ class WebRTCMicrophoneManager:
                         logger.error(f"Failed to create virtual sink: {create_result.stderr.strip()}")
                         continue
                 else:
-                    logger.info(f"Virtual microphone sink '{sink_name}' already exists.")
+                    logger.debug(f"Virtual microphone sink '{sink_name}' already exists.")
             except Exception as e:
                 logger.error(f"Error ensuring sink {sink_name}: {e}")
         self.sinks_ready = True
@@ -396,7 +491,7 @@ class WebRTCMicrophoneManager:
                     module_id = parts[0]
                     try:
                         subprocess.run(['pactl', 'unload-module', module_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                        logger.info(f"Unloaded existing null-sink module {module_id}")
+                        logger.debug(f"Unloaded existing null-sink module {module_id}")
                     except Exception:
                         logger.exception(f"Failed to unload module {module_id}")
         except Exception:
@@ -496,7 +591,7 @@ class WebRTCMicrophoneManager:
 
     def list_microphones(self):
         """Return all active microphones (player_id -> sink.monitor)."""
-        return {pid: mic.get_monitor_source() for pid, mic in self.microphones.items()}
+        return self.microphones.items()
 
 
     def connect_microphone_to_sink(self, player_id, sink_index):
@@ -508,7 +603,7 @@ class WebRTCMicrophoneManager:
         if not mic:
             logger.error(f"connect_microphone_to_sink: Microphone not found for player_id {player_id}")
             return {'success': False, 'error': 'Microphone not found'}
-        monitor_source = mic.get_monitor_source()
+        monitor_source = mic.link_name
         sink_name = self.sink_names[sink_index]
         logger.debug(f"connect_microphone_to_sink: player_id={player_id}, sink_index={sink_index}, monitor_source={monitor_source}, sink_name={sink_name}")
         logger.debug(f"mic.pw_ports: {getattr(mic, 'pw_ports', None)}")
@@ -519,17 +614,6 @@ class WebRTCMicrophoneManager:
             logger.debug("Listing pw-link -l before linking:")
             pw_before = subprocess.run(['pw-link', '-I', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             logger.debug(f"pw-link -l output before:\n{pw_before.stdout}")
-
-            logger.debug("Listing pactl sinks and sources before linking:")
-            pactl_sinks = subprocess.run(['pactl', 'list', 'short', 'sinks'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            pactl_sources = subprocess.run(['pactl', 'list', 'short', 'sources'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            logger.debug(f"pactl sinks:\n{pactl_sinks.stdout}")
-            logger.debug(f"pactl sources:\n{pactl_sources.stdout}")
-
-            # Wait a short while for ports to appear in pw-link/pactl (race on creation)
-            ok, diag = self._wait_for_ports(monitor_source, sink_name, timeout=3.0)
-            if not ok:
-                logger.warning(f"Ports not visible before linking: {diag}")
 
             # Prefer numeric pw port linking if available
             used_numeric = False
@@ -551,70 +635,23 @@ class WebRTCMicrophoneManager:
                         used_numeric = True
                 if used_numeric:
                     self.source_connections[player_id] = sink_index
-                    logger.info(f"Connected webrtc-cli numeric ports {mic.pw_ports} to {sink_name}")
+                    logger.debug(
+                        f"Connected {getattr(mic, 'link_name', 'pulse-receive')} numeric ports {mic.pw_ports} to {sink_name}"
+                    )
                     return {'success': True}
-
-            # Fallback: use monitor_source name
-            cmd = [
-                'pw-link',
-                f'{monitor_source}:output',
-                f'{sink_name}:input'
-            ]
-            logger.debug(f"Attempting pw-link (named): {' '.join(cmd)}")
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            logger.debug(f"pw-link (named) result: returncode={result.returncode}, stdout={result.stdout}, stderr={result.stderr}")
-            if result.returncode != 0:
-                # collect diagnostics to help debugging
-                pw_list = subprocess.run(['pw-link', '-I', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                pactl_sinks2 = subprocess.run(['pactl', 'list', 'short', 'sinks'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                pactl_sources2 = subprocess.run(['pactl', 'list', 'short', 'sources'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                logger.error(f"pw-link (named) failed: {result.stderr.strip()}\npw-link -l:\n{pw_list.stdout}\nSinks:\n{pactl_sinks2.stdout}\nSources:\n{pactl_sources2.stdout}")
-                return {'success': False, 'error': f"pw-link failed: {result.stderr.strip()}"}
-            self.source_connections[player_id] = sink_index
-            logger.info(f"Connected {monitor_source} to {sink_name} (named fallback)")
-            return {'success': True}
         except Exception as e:
-            logger.error(f"Error connecting monitor to sink: {e}")
-            return {'success': False, 'error': str(e)}
-
-    def _wait_for_ports(self, monitor_source, sink_name, timeout=3.0):
-        """Wait up to `timeout` seconds for monitor_source:output and sink_name:input to appear in pw-link -l or pactl lists.
-
-        Returns (True, '') if both present, or (False, diagnostics) if not.
-        """
-        deadline = time.time() + timeout
-        last_pw = ''
-        while time.time() < deadline:
-            try:
-                pw = subprocess.run(['pw-link', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                last_pw = pw.stdout
-                out = pw.stdout
-                want_out = f"{monitor_source}:output"
-                want_in = f"{sink_name}:input"
-                if want_out in out and want_in in out:
-                    return True, ''
-            except Exception:
-                pass
-            # also check pactl lists as a fallback
-            try:
-                sinks = subprocess.run(['pactl', 'list', 'short', 'sinks'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                sources = subprocess.run(['pactl', 'list', 'short', 'sources'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                if monitor_source in sources.stdout and sink_name in sinks.stdout:
-                    return True, ''
-            except Exception:
-                pass
-            time.sleep(0.2)
-        diag = f"pw-link -l:\n{last_pw}\n(pactl sinks/sources not matching)"
-        return False, diag
+            pass
+        logger.error(f"Error connecting monitor to sink: {e}")
+        return {'success': False, 'error': str(e)}
 
     def disconnect_microphone(self, player_id):
         """Disconnect a player's monitor source from all sinks using pw-link -d."""
         mic = self.microphones.get(player_id)
         if not mic:
             return {'success': False, 'error': 'Microphone not found'}
-        monitor_source = mic.get_monitor_source()
+        monitor_source = mic.link_name or f"pulse-receive-{player_id}"
         # If numeric pw ports were discovered for this mic, try to disconnect the exact peer ids
-        # Strategy: read `pw-link -I -l`, find the line that starts with the webrtc-cli output port id,
+        # Strategy: read `pw-link -I -l`, find the line that starts with the pulse-receive output port id,
         # then scan the following lines for connection entries containing '|->' and extract the left-most id
         # from those lines. Call `pw-link -d <id>` for each extracted id.
         try:
@@ -628,9 +665,9 @@ class WebRTCMicrophoneManager:
 
                 for key, port_id in mic.pw_ports.items():
                     port_str = str(port_id)
-                    # find the line that begins with the numeric id and mentions webrtc-cli
+                    # find the line that begins with the numeric id and mentions pulse-receive
                     idx = None
-                    pattern = re.compile(r'^\s*' + re.escape(port_str) + r'\b.*webrtc-cli', re.IGNORECASE)
+                    pattern = re.compile(r'^\s*' + re.escape(port_str) + r'\b.*pulse-receive', re.IGNORECASE)
                     for i, line in enumerate(pw_lines):
                         if pattern.match(line):
                             idx = i
@@ -662,17 +699,5 @@ class WebRTCMicrophoneManager:
         except Exception:
             logger.exception('Error while disconnecting numeric ports')
 
-        # Fallback: also disconnect monitor source name from sink inputs
-        for sink_name in self.sink_names:
-            try:
-                cmd = [
-                    'pw-link', '-d',
-                    f'{monitor_source}:output',
-                    f'{sink_name}:input'
-                ]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                logger.debug(f"pw-link -d {monitor_source}:output {sink_name}:input -> rc={res.returncode} stderr={res.stderr.strip()}")
-            except Exception as e:
-                logger.error(f"Error disconnecting {monitor_source} from {sink_name}: {e}")
         self.source_connections.pop(player_id, None)
         return {'success': True}

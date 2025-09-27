@@ -16,9 +16,6 @@ SmartMicrophone is a modern, open-source web-based microphone and remote control
 
 ---
 
-## Bugs
-- **No iPhone Support:** for some reason webrtc-cli does not like webrtc streams from iphones. Currently Android and Linux clients work.
-
 ## Installation
 git clone https://github.com/dgruss/SmartMicrophone.git
 ### Supported OS: Ubuntu/Debian (recommended)
@@ -27,18 +24,14 @@ git clone https://github.com/dgruss/SmartMicrophone.git
 ```sh
 sudo add-apt-repository ppa:longsleep/golang-backports
 sudo apt update
-sudo apt update
-sudo apt install python3 python3-pip git make gcc make pkg-config libopus-dev libopusfile-dev libpulse-dev golang-go libsdl2-image-dev python3-flask pipewire pipewire-pulse
+sudo apt install python3 python3-pip git make gcc make pkg-config libopus-dev libopusfile-dev libpulse-dev golang-go libsdl2-image-dev python3-flask pipewire pipewire-pulse libpulse-dev libopus-dev
 ```
 
-#### 2. Clone the Repository, Submodules, and build webrtc-cli
+#### 2. Clone the Repository, Submodules, and build pulse-receive
 ```sh
 git clone https://github.com/dgruss/SmartMicrophone.git
-cd SmartMicrophone
-git submodule init
-git submodule update
-cd webrtc-cli
-make
+cd SmartMicrophone/pulse-receive
+go build .
 cd ..
 ```
 
@@ -46,6 +39,17 @@ cd ..
 - Install UltraStar Deluxe and place your songs in the appropriate folder (currently only the /songs folder is supported but symlinks are followed)
 - Some features require using [the dgruss beta3](https://github.com/dgruss/USDX/tree/beta3) version as they are not upstreamed yet
 - Make sure you know the path to your usdx directory (e.g., `/home/user/usdx`)
+
+```
+cd ~
+git clone https://github.com/dgruss/USDX.git usdx
+cd usdx
+git checkout beta3
+sudo apt install git automake make gcc fpc libsdl2-image-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev libsqlite3-dev libfreetype6-dev portaudio19-dev libportmidi-dev liblua5.3-dev libopencv-videoio-dev fonts-dejavu
+./autogen.sh
+./configure --without-portaudio --without-portmixer
+make
+```
 
 #### 4. (Optional) Configure SSL, Set up Wi-Fi Hotspot and Internet Forwarding
 - Place your SSL certificate and key files in the project directory if you want HTTPS --- this might be required to convince your phone to use WebRTC. Self-signed certificates work. Otherwise you can use a domain or subdomain you have on the Internet (give the DNS entry a short lifetime on your server!) and configure SmartMicrophone to use domain and certificates

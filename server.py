@@ -119,7 +119,6 @@ def rooms_stream():
 
     return Response(stream_with_context(gen()), mimetype='text/event-stream')
 
-
 # Endpoint that merges rooms and control status and records a heartbeat
 @app.route('/status', methods=['GET'])
 def status():
@@ -138,6 +137,9 @@ def status():
 @app.before_request
 def log_incoming_request():
     try:
+        sid = session.get('session_id')
+        if sid:
+            LAST_SEEN[sid] = time.time()
         if not request.path in ['/rooms', '/status', '/control/status']:
             logger.info('Incoming request: %s %s args=%s', request.method, request.path, dict(request.args))
     except Exception:
@@ -157,7 +159,7 @@ def index():
     # maybe this person just reloaded but still has a microphone running
     if 'session_id' in session and is_youngest_session():
         mic_idx = session.get('microphone_index')
-        logger.info("Session %s is still active, automatically reconnecting microphone %s.", session.get('session_id'), mic_idx)
+        logger.debug("Session %s is still active, automatically reconnecting microphone %s.", session.get('session_id'), mic_idx)
         # only reconnect automatically if we actually have a microphone index in the session
         if mic_idx is not None:
             automatically_reconnect = True
@@ -183,8 +185,9 @@ def api():
     action = request.form.get('action')
     logger.info(f'Received action: {action}')
 
+
     if action == 'start_webrtc':
-        # Start per-player webrtc-cli using the provided SDP offer
+        # Start per-player pulse-receive using the provided SDP offer
         offer = request.form.get('offer')
         if not offer:
             return jsonify({'success': False, 'error': 'Missing offer'})
@@ -212,9 +215,6 @@ def api():
             'microphone_index': sink_index,
             'microphone_start_timestamp': session['microphone_start_timestamp']
         }
-
-        return jsonify({'success': True, 'answer': start_res.get('answer'), 'player_id': player_id})
-
 
     if action == 'get_assignments':
         return jsonify({'success': True, 'assignments': get_mic_assignments()})
@@ -301,7 +301,7 @@ def run_xdotool_command(args):
                 ids = [l.strip() for l in ws.stdout.splitlines() if l.strip()]
                 if ids:
                     ULTRASTAR_WINDOW_ID = ids[0]
-                    logger.info('Cached UltraStar window id: %s', ULTRASTAR_WINDOW_ID)
+                    logger.debug('Cached UltraStar window id: %s', ULTRASTAR_WINDOW_ID)
                 else:
                     logger.warning('No UltraStar window found via `xdotool search UltraStar`')
                     return False, 'window not found'
@@ -385,7 +385,7 @@ def control_release():
     CONTROL_OWNER = None
     CONTROL_OWNER_NAME = None
     CONTROL_TIMESTAMP = 0
-    logger.info('Control released by session %s', sid)
+    logger.debug('Control released by session %s', sid)
     return jsonify({'success': True})
 
 
@@ -1227,6 +1227,20 @@ if __name__ == '__main__':
                 stale = []
                 for sid, last in list(LAST_SEEN.items()):
                     if now - last > 10.0:
+                        # If this session has an associated microphone process that is still alive,
+                        # treat the session as active and skip stale removal.
+                        try:
+                            mic = mgr.microphones.get(sid)
+                            if mic:
+                                try:
+                                    if mic.is_process_alive():
+                                        logger.debug('Session %s has active microphone; skipping stale removal', sid)
+                                        continue
+                                except Exception:
+                                    # If mic liveness check fails, fall back to treating as stale
+                                    logger.exception('Error checking mic liveness for session %s', sid)
+                        except Exception:
+                            logger.exception('Error inspecting microphones for session %s', sid)
                         stale.append(sid)
                 for sid in stale:
                     try:

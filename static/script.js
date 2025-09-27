@@ -735,9 +735,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const pc = new RTCPeerConnection();
         window.smartMicPC = pc;
 
-        // Send local ICE candidates to server if needed (server-side webrtc-cli may not need them)
+        // Send local ICE candidates to server if needed (server-side pulse-receive may not need them)
         pc.onicecandidate = (ev) => {
-            // we do not currently send candidates to server; server's webrtc-cli is expected to be
+            // we do not currently send candidates to server; server's pulse-receive is expected to be
             // the offer/answer terminator. If needed, implement trickle ICE here.
             if (!ev.candidate) return;
             printLog('Local ICE candidate: ' + JSON.stringify(ev.candidate));
