@@ -1,3 +1,0 @@
-[submodule "webrtc-cli"]
-	path = webrtc-cli
-	url = git@github.com:jonasjuffinger/webrtc-cli.git
