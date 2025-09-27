@@ -1,47 +1,42 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
-// SPDX-License-Identifier: MIT
-
-//go:build !js
-// +build !js
-
 // simple app to receive audio using Pion WebRTC and play using PulseAudio for redirection into other apps
 package main
 
 import (
-		"bufio"
-		"encoding/base64"
-		"encoding/json"
-		"errors"
-		"flag"
-		"fmt"
-		"io"
-		"os"
-		"strings"
-		"time"
+	"bufio"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
 
+	"github.com/dgruss/SmartMicrophone/pulse-receive/snd"
 	"github.com/pion/webrtc/v4"
 	opus "gopkg.in/hraban/opus.v2"
-	"github.com/dgruss/SmartMicrophone/pulse-receive/snd"
 )
 
 func main() {
-		// Command-line flags
-		rate := flag.Uint("rate", 48000, "sample rate")
-		chans := flag.Uint("chans", 2, "number of channels")
-		pulseBuf := flag.Duration("pulse-buf", 20*time.Millisecond, "PulseAudio buffer size")
-		debug := flag.Bool("debug", false, "enable more logs (and minimal output otherwise)")
+	// Command-line flags
+	rate := flag.Uint("rate", 48000, "sample rate")
+	chans := flag.Uint("chans", 2, "number of channels")
+	pulseBuf := flag.Duration("pulse-buf", 20*time.Millisecond, "PulseAudio buffer size")
+	linkName := flag.String("link-name", "pulse-receive", "PulseAudio stream base name (used for ports and client name)")
+	debug := flag.Bool("debug", false, "enable more logs (and minimal output otherwise)")
 
-		flag.Parse()
+	flag.Parse()
 
-		if *debug {
-			fmt.Printf("Flags: rate=%d chans=%d pulse-buf=%s\n",
-				*rate, *chans, pulseBuf.String())
-		}
+	if *debug {
+		fmt.Printf("Flags: rate=%d chans=%d pulse-buf=%s link-name=%s\n",
+			*rate, *chans, pulseBuf.String(), *linkName)
+	}
 
-		// Prepare the configuration
-		config := webrtc.Configuration{
-			ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
-		}
+	// Prepare the configuration
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+	}
 
 	// Create a new RTCPeerConnection
 	peerConnection, err := webrtc.NewPeerConnection(config)
@@ -49,40 +44,40 @@ func main() {
 		panic(err)
 	}
 
-		// Set a handler for when a new remote track starts and route supported media
-		peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			mimeParts := strings.Split(track.Codec().RTPCodecCapability.MimeType, "/")
-			codecName := mimeParts[len(mimeParts)-1]
-			if *debug {
-				fmt.Printf("Track has started, of type %d: %s \n", track.PayloadType(), codecName)
-			}
+	// Set a handler for when a new remote track starts and route supported media
+	peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		mimeParts := strings.Split(track.Codec().RTPCodecCapability.MimeType, "/")
+		codecName := mimeParts[len(mimeParts)-1]
+		if *debug {
+			fmt.Printf("Track has started, of type %d: %s \n", track.PayloadType(), codecName)
+		}
 
-			if strings.EqualFold(codecName, "rtx") {
+		if strings.EqualFold(codecName, "rtx") {
+			if *debug {
+				fmt.Println("Ignoring RTX track")
+			}
+			return
+		}
+
+		switch track.Kind() {
+		case webrtc.RTPCodecTypeAudio:
+			if !strings.EqualFold(codecName, "opus") {
 				if *debug {
-					fmt.Println("Ignoring RTX track")
+					fmt.Printf("Audio codec %s not supported, ignoring\n", codecName)
 				}
 				return
 			}
-
-			switch track.Kind() {
-			case webrtc.RTPCodecTypeAudio:
-				if !strings.EqualFold(codecName, "opus") {
-					if *debug {
-						fmt.Printf("Audio codec %s not supported, ignoring\n", codecName)
-					}
-					return
-				}
-				go handleAudioTrack(track, *rate, *chans, *pulseBuf, *debug)
-			case webrtc.RTPCodecTypeVideo:
-				if *debug {
-					fmt.Println("Ignoring video track, Audio only")
-				}
-			default:
-				if *debug {
-					fmt.Printf("Unsupported track type %s, ignoring\n", track.Kind())
-				}
+			go handleAudioTrack(track, *rate, *chans, *pulseBuf, *debug, *linkName)
+		case webrtc.RTPCodecTypeVideo:
+			if *debug {
+				fmt.Println("Ignoring video track, Audio only")
 			}
-		})
+		default:
+			if *debug {
+				fmt.Printf("Unsupported track type %s, ignoring\n", track.Kind())
+			}
+		}
+	})
 
 	// Set the handler for ICE connection state
 	// This will notify you when the peer has connected/disconnected
@@ -127,7 +122,7 @@ func main() {
 	select {}
 }
 
-func handleAudioTrack(track *webrtc.TrackRemote, rate uint, chans uint, pulseBuf time.Duration, debug bool) {
+func handleAudioTrack(track *webrtc.TrackRemote, rate uint, chans uint, pulseBuf time.Duration, debug bool, linkName string) {
 	const maxOpusFrameDuration = 120 * time.Millisecond
 	frameDuration := pulseBuf
 
@@ -149,6 +144,7 @@ func handleAudioTrack(track *webrtc.TrackRemote, rate uint, chans uint, pulseBuf
 		Rate:        sampleRate,
 		Channels:    channels,
 		FrameLength: frameDuration,
+		LinkName:    linkName,
 	})
 	if err != nil {
 		fmt.Printf("failed to create pulse player: %v\n", err)

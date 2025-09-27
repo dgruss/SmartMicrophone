@@ -23,12 +23,8 @@ sudo apt-get install libpulse-dev libopus-dev pkg-config
 
 ## Build
 
-Clone the repository and build the application:
-
 ```bash
-git clone https://github.com/jonasjuffinger/webrtc-cli.git
-cd webrtc-cli/pulse-receive
-go build -o pulse-receive
+go build .
 ```
 
 ## Usage

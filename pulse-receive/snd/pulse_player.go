@@ -73,9 +73,15 @@ func (p *PulsePlayer) runPlayback(params Params) {
 		Channels: uint8(params.Channels),
 	}
 
+	streamName := params.LinkName
+	if streamName == "" {
+		streamName = "pulse-receive"
+	}
+	clientName := streamName + "-play"
+
 	var err error
 	p.stream, err = pulse.NewStream(
-		"", "webrtc-cli", pulse.STREAM_PLAYBACK, params.DeviceOrFile, "webrtc-cli-play",
+		"", streamName, pulse.STREAM_PLAYBACK, params.DeviceOrFile, clientName,
 		&sampleSpec, nil, nil,
 	)
 

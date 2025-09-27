@@ -7,4 +7,5 @@ type Params struct {
 	Rate         int
 	Channels     int
 	FrameLength  time.Duration
+	LinkName     string
 }
