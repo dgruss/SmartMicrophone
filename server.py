@@ -216,7 +216,7 @@ def api():
             'microphone_start_timestamp': session['microphone_start_timestamp']
         }
 
-    if action == 'get_assignments':
+    elif action == 'get_assignments':
         return jsonify({'success': True, 'assignments': get_mic_assignments()})
 
     elif action == 'remote_text':
@@ -236,8 +236,9 @@ def api():
             return jsonify({'success': True, 'user': remote_control_user, 'command': cmd})
         else:
             return jsonify({'success': False, 'error': f'Remote control in use by {remote_control_user}'})
-
-    return jsonify({'success': False, 'error': 'Invalid action'})
+    else:
+        return jsonify({'success': False, 'error': 'Invalid action: ' + action})
+    return jsonify({'success': True, 'answer': start_res.get('answer'), 'player_id': player_id})
 
 
 @app.route('/static/<path:path>')   # serve static files
@@ -1085,20 +1086,21 @@ def remap_ssl_port():
                     ip_list.append(ip)
         if not ip_list:
             logger.info("No valid global IPv4 addresses found for remapping.")
-        for ip in ip_list:
-            # Check if rule already exists
-            check_cmd = ["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
-            check_result = subprocess.run(check_cmd, capture_output=True, text=True)
-            if check_result.returncode == 0:
-                logger.info(f"Rule for {ip}:443 -> {args.port} already exists, skipping.")
-                continue
-            cmd = ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
-            logger.info("Running: %s", " ".join(cmd))
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                logger.info("Remapped 443 to %d for %s", args.port, ip)
-            else:
-                logger.error("Failed to remap for %s: %s", ip, result.stderr)
+        if ip not in ['0.0.0.0', '::', '']:
+            for ip in ip_list:
+                # Check if rule already exists
+                check_cmd = ["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
+                check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+                if check_result.returncode == 0:
+                    logger.info(f"Rule for {ip}:443 -> {args.port} already exists, skipping.")
+                    continue
+                cmd = ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
+                logger.info("Running: %s", " ".join(cmd))
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info("Remapped 443 to %d for %s", args.port, ip)
+                else:
+                    logger.error("Failed to remap for %s: %s", ip, result.stderr)
     except Exception as e:
         logger.error("Error remapping SSL port: %s", e)
 
