@@ -1069,38 +1069,59 @@ def setup_domain_hotspot_mapping(domain):
 def remap_ssl_port():
     print("Remapping port 443 to", args.port, "using iptables...")
     try:
-        # Use 'ip -4 -o addr show' to get all IPv4 addresses
+        # Prefer to remap only the hotspot device IPs when provided.
         ip_list = []
-        result = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 4:
-                    iface = parts[1]
-                    ip = parts[3].split('/')[0]
-                    # Exclude loopback, docker, and local addresses
-                    if iface.startswith('lo') or iface.startswith('docker'):
-                        continue
-                    if ip.startswith('127.') or ip.startswith('0.'):
-                        continue
-                    ip_list.append(ip)
-        if not ip_list:
-            logger.info("No valid global IPv4 addresses found for remapping.")
-        if ip not in ['0.0.0.0', '::', '']:
-            for ip in ip_list:
-                # Check if rule already exists
-                check_cmd = ["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
-                check_result = subprocess.run(check_cmd, capture_output=True, text=True)
-                if check_result.returncode == 0:
-                    logger.info(f"Rule for {ip}:443 -> {args.port} already exists, skipping.")
-                    continue
-                cmd = ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-d", ip, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
-                logger.info("Running: %s", " ".join(cmd))
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    logger.info("Remapped 443 to %d for %s", args.port, ip)
-                else:
-                    logger.error("Failed to remap for %s: %s", ip, result.stderr)
+        hotspot_dev = getattr(args, 'hotspot_device', None)
+
+        if hotspot_dev:
+            # Only consider addresses on the hotspot interface
+            res = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", hotspot_dev], capture_output=True, text=True)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        ip_addr = parts[3].split('/')[0]
+                        if ip_addr and not ip_addr.startswith('127.') and not ip_addr.startswith('0.'):
+                            ip_list.append(ip_addr)
+            if not ip_list:
+                logger.info("No valid IPv4 addresses found on hotspot device '%s' for remapping.", hotspot_dev)
+                return
+        else:
+            # No hotspot device specified: warn and fall back to scanning non-loopback addresses
+            logger.warning("No --hotspot-device specified; remapping will consider non-loopback addresses on all interfaces (may remap more than intended).")
+            res = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        iface = parts[1]
+                        ip_addr = parts[3].split('/')[0]
+                        # Exclude loopback, docker, and local addresses
+                        if iface.startswith('lo') or iface.startswith('docker'):
+                            continue
+                        if ip_addr.startswith('127.') or ip_addr.startswith('0.'):
+                            continue
+                        ip_list.append(ip_addr)
+            if not ip_list:
+                logger.info("No valid global IPv4 addresses found for remapping.")
+                return
+
+        # Apply iptables rules only for the collected IPs
+        for ip_addr in ip_list:
+            check_cmd = ["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "-d", ip_addr, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
+            print("cmd:", " ".join(check_cmd))
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+            if check_result.returncode == 0:
+                logger.info("Rule for %s:443 -> %s already exists, skipping.", ip_addr, args.port)
+                continue
+            cmd = ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-d", ip_addr, "--dport", "443", "-j", "REDIRECT", "--to-port", str(args.port)]
+            print("cmd:", " ".join(check_cmd))
+            logger.info("Running: %s", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                logger.info("Remapped 443 to %d for %s", args.port, ip_addr)
+            else:
+                logger.error("Failed to remap for %s: %s", ip_addr, result.stderr)
     except Exception as e:
         logger.error("Error remapping SSL port: %s", e)
 
