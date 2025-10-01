@@ -38,17 +38,19 @@ cd ..
 #### 3. Prepare UltraStar Deluxe
 - Install UltraStar Deluxe and place your songs in the appropriate folder (currently only the /songs folder is supported but symlinks are followed)
 - Some features require using [the dgruss beta3](https://github.com/dgruss/USDX/tree/beta3) version as they are not upstreamed yet
-- Make sure you know the path to your usdx directory (e.g., `/home/user/usdx`)
+- Make sure you know the path to your usdx game directory (e.g., `/home/user/usdx`)
 
 ```
 cd ~
-git clone https://github.com/dgruss/USDX.git usdx
-cd usdx
+git clone https://github.com/dgruss/USDX.git usdxdev
+cd usdxdev
 git checkout beta3
 sudo apt install git automake make gcc fpc libsdl2-image-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev libsqlite3-dev libfreetype6-dev portaudio19-dev libportmidi-dev liblua5.3-dev libopencv-videoio-dev fonts-dejavu
 ./autogen.sh
 ./configure --without-portaudio --without-portmixer
 make
+cd ~
+ln -s ~/usdxdev/game usdx
 ```
 
 #### 4. (Optional) Configure SSL, Set up Wi-Fi Hotspot and Internet Forwarding
