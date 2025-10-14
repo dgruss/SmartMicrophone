@@ -1072,10 +1072,13 @@ def remap_ssl_port():
         # Prefer to remap only the hotspot device IPs when provided.
         ip_list = []
         hotspot_dev = getattr(args, 'hotspot_device', None)
-
         if hotspot_dev:
             # Only consider addresses on the hotspot interface
-            res = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", hotspot_dev], capture_output=True, text=True)
+            res = None
+            while res == None or res.stdout == "":
+                res = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", hotspot_dev], capture_output=True, text=True)
+                time.sleep(1)
+                print(f"Cannot see the IP yet...")
             if res.returncode == 0:
                 for line in res.stdout.splitlines():
                     parts = line.split()
