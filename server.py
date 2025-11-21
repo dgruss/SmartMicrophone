@@ -59,6 +59,8 @@ ROOMS = {
 SESSION_USERNAMES = {}
 # Optional mapping of session id -> preferred per-player delay (ms)
 SESSION_DELAYS = {}
+# Optional mapping of session id -> most recent room selection
+SESSION_ROOMS = {}
 
 # SSE listeners will be set up after the Flask app is created to avoid
 # referencing `app` before initialization.
@@ -126,8 +128,21 @@ def status():
         sid = session.get('session_id')
         if sid:
             LAST_SEEN[sid] = time.time()
+        current_room = session.get('current_room')
+        if sid and not current_room:
+            current_room = SESSION_ROOMS.get(sid)
+        user_payload = {
+            'session_id': sid,
+            'name': SESSION_USERNAMES.get(sid),
+            'room': current_room
+        }
         # prepare payload with rooms and control status
-        payload = {'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'control': {'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME, 'timestamp': CONTROL_TIMESTAMP}}
+        payload = {
+            'success': True,
+            'rooms': {r: list(u) for r, u in ROOMS.items()},
+            'control': {'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME, 'timestamp': CONTROL_TIMESTAMP},
+            'you': user_payload
+        }
         return jsonify(payload)
     except Exception as e:
         logger.exception('Failed to serve /status: %s', e)
@@ -581,6 +596,8 @@ def rooms_join():
 
         # Add to target room
         ROOMS[room].append(username)
+        SESSION_ROOMS[sid] = room
+        session['current_room'] = room
 
         # Connect the player's source to the correct sink if their microphone is running
         mgr = WebRTCMicrophoneManager()
@@ -598,6 +615,13 @@ def rooms_join():
         except Exception:
             logger.exception('Failed to connect microphone for session %s to sink %s', sid, sink_index)
             pass
+
+        try:
+            session['microphone_index'] = sink_index
+            if sid in sessions:
+                sessions[sid]['microphone_index'] = sink_index
+        except Exception:
+            logger.exception('Failed to persist sink index for session %s', sid)
 
         # Notify SSE listeners of update
         try:
@@ -646,6 +670,12 @@ def rooms_leave():
                 del SESSION_USERNAMES[sid]
             except Exception:
                 pass
+        if sid:
+            SESSION_ROOMS.pop(sid, None)
+        try:
+            session.pop('current_room', None)
+        except Exception:
+            pass
     except Exception as e:
         logger.exception('Failed to leave room: %s', e)
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1289,6 +1319,7 @@ if __name__ == '__main__':
                                     update_config_players()
                                 except Exception:
                                     logger.exception('Failed to update config players after stale removal')
+                            SESSION_ROOMS.pop(sid, None)
                         except Exception:
                             logger.exception('Error removing user mapping for stale session %s', sid)
                         # Release control ownership if this session held it

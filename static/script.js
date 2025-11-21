@@ -368,6 +368,11 @@ micAssignments = []
 currentMicIndex = undefined
 remoteControlUser = undefined
 
+let currentRoom = 'lobby';
+try {
+    currentRoom = localStorage.getItem('currentRoom') || 'lobby';
+} catch (e) {}
+
 const MICROPHONE_COLORS = [
     '#3357FF',  // Blue
     '#FF3434',  // Red
@@ -399,11 +404,79 @@ document.addEventListener('DOMContentLoaded', function() {
         mic6: []
     };
 
+    function rememberCurrentRoom(roomName) {
+        currentRoom = roomName || 'lobby';
+        try {
+            localStorage.setItem('currentRoom', currentRoom);
+        } catch (e) {}
+    }
+
+    rememberCurrentRoom(currentRoom || 'lobby');
+
+    async function attemptServerJoin(targetRoom, options = {}) {
+        const roomName = targetRoom || 'lobby';
+        const { silent = false } = options;
+        if (!userName) {
+            if (!silent) {
+                printLog('Please set your name before joining a room.');
+            }
+            return false;
+        }
+        if (!silent) {
+            printLog(`Attempting to join ${roomName} as ${userName}`);
+        }
+        let delayVal = 0;
+        try {
+            delayVal = parseInt(localStorage.getItem('playerDelayMs') || '0') || 0;
+        } catch (e) {}
+        try {
+            const res = await fetch('/rooms/join', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'include',
+                body: JSON.stringify({room: roomName, name: userName, delay: delayVal})
+            });
+            const data = await res.json();
+            if (data && data.success) {
+                rooms = data.rooms || rooms;
+                if (data.name) {
+                    userName = data.name;
+                    localStorage.setItem('userName', userName);
+                }
+                const serverRoom = data.room || roomName;
+                rememberCurrentRoom(serverRoom);
+                if (!silent) {
+                    printLog(`Joined ${serverRoom} (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
+                }
+                updateRoomDisplays();
+                return true;
+            } else if (!silent) {
+                printLog('Server join failed: ' + (data && data.error));
+            }
+        } catch (e) {
+            if (!silent) {
+                printLog('Server join error: ' + e);
+            }
+        }
+        return false;
+    }
+
+    let membershipCheckPromise = null;
+    function ensureRoomMembership(source) {
+        if (!userName || !currentRoom) return;
+        const members = rooms[currentRoom] || [];
+        if (members.includes(userName)) return;
+        if (membershipCheckPromise) return;
+        membershipCheckPromise = attemptServerJoin(currentRoom, {silent: true}).finally(() => {
+            membershipCheckPromise = null;
+        });
+    }
+
     // Show/hide name entry
     if (userName) {
         nameEntry.style.display = 'none';
         mainLobby.style.display = 'flex';
-        joinLobby(); // Ensure name is added to lobby on load
+        attemptServerJoin(currentRoom || 'lobby', {silent: true}); // Ensure server keeps us in our last room
         // Start WebRTC session for this client (capture mic, send offer to server)
         try {
             if (!window.smartMicPC) {
@@ -422,7 +495,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     if (saveNameBtn) {
-        saveNameBtn.onclick = function() {
+        saveNameBtn.onclick = async function() {
             let val = userNameInput.value.trim();
             printLog(`Name entered: ${val}`);
             if (val.length > 0) {
@@ -461,6 +534,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 updateRoomDisplays();
                 updateMicDisplay();
+                if (prevRoom && prevRoom.startsWith('mic')) {
+                    const micNum = parseInt(prevRoom.slice(3), 10);
+                    if (!Number.isNaN(micNum)) {
+                        await selectMicBox(micNum);
+                        return;
+                    }
+                }
+                await joinLobby();
             }
         };
     } else {
@@ -583,67 +664,30 @@ document.addEventListener('DOMContentLoaded', function() {
         };
     }
 
-    async function joinLobby() {
-        printLog(`Attempting to join lobby as ${userName}`);
-        // Try server-side join first
-        try {
-            const delayVal = parseInt(localStorage.getItem('playerDelayMs') || '0') || 0;
-            const res = await fetch('/rooms/join', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                credentials: 'include',
-                body: JSON.stringify({room: 'lobby', name: userName, delay: delayVal})
-            });
-            const data = await res.json();
-            if (data && data.success) {
-                rooms = data.rooms || rooms;
-                // server may have normalized the display name
-                if (data.name) { userName = data.name; localStorage.setItem('userName', userName); }
-                printLog(`Joined lobby (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
-                updateRoomDisplays();
-                return;
-            } else {
-                printLog('Server join failed: ' + (data && data.error));
-            }
-        } catch (e) {
-            printLog('Server join error: ' + e);
-        }
+    async function joinLobby(options = {}) {
+        const { silent = false } = options;
+        const success = await attemptServerJoin('lobby', {silent});
+        if (success) return;
 
-        // Fallback: local-only behavior if server not reachable
-        printLog(`You joined the lobby. Current lobby users: [${rooms.lobby.join(', ')}]`);
+        if (!silent) {
+            printLog(`You joined the lobby. Current lobby users: [${rooms.lobby.join(', ')}]`);
+        }
         Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
         rooms.lobby.push(userName);
+        rememberCurrentRoom('lobby');
         updateRoomDisplays();
     }
 
-    async function selectMicBox(micNum) {
+    async function selectMicBox(micNum, options = {}) {
+        const { silent = false } = options;
         const target = 'mic' + micNum;
-        printLog(`Attempting to join ${target} as ${userName}`);
-        try {
-            const delayVal = parseInt(localStorage.getItem('playerDelayMs') || '0') || 0;
-            const res = await fetch('/rooms/join', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                credentials: 'include',
-                body: JSON.stringify({room: target, name: userName, delay: delayVal})
-            });
-            const data = await res.json();
-            if (data && data.success) {
-                rooms = data.rooms || rooms;
-                if (data.name) { userName = data.name; localStorage.setItem('userName', userName); }
-                printLog(`Joined ${target} (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
-                updateRoomDisplays();
-                return;
-            } else {
-                printLog('Server join failed: ' + (data && data.error));
-            }
-        } catch (e) {
-            printLog('Server join error: ' + e);
-        }
+        const success = await attemptServerJoin(target, {silent});
+        if (success) return;
 
         // Fallback to local-only behavior if server not available
         Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
-        rooms['mic' + micNum].push(userName);
+        rooms[target].push(userName);
+        rememberCurrentRoom(target);
         updateRoomDisplays();
     }
 
@@ -711,6 +755,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.rooms) {
                     rooms = data.rooms;
                     updateRoomDisplays();
+                    ensureRoomMembership('poll');
                 }
                 if (data.control) {
                     controlOwner = data.control.owner;
@@ -822,7 +867,7 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 printLog('Attempting reconnect (attempt ' + _reconnectAttempts + ')');
                 // re-join lobby/room on server to ensure server-side session exists
-                await joinLobby();
+                await attemptServerJoin(currentRoom || 'lobby', {silent: true});
                 // restart WebRTC session
                 if (window.smartMicPC) {
                     try { window.smartMicPC.close(); } catch(e){}
@@ -851,6 +896,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (payload && payload.rooms) {
                         rooms = payload.rooms;
                         updateRoomDisplays();
+                        ensureRoomMembership('sse');
                         printLog('Received SSE rooms update');
                     }
                 } catch (e) { /* ignore parse errors */ }
