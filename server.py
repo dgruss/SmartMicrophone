@@ -55,6 +55,67 @@ ROOMS = {
     'mic6': []
 }
 
+BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
+ROOM_CAPACITY_FILE = os.path.join(DATA_DIR, 'room_capacity.json')
+
+# Default per-channel capacity (can be updated at runtime via API)
+DEFAULT_ROOM_CAPACITY = {
+    'mic1': 6,
+    'mic2': 6,
+    'mic3': 6,
+    'mic4': 6,
+    'mic5': 6,
+    'mic6': 6
+}
+ROOM_CAPACITY = {}
+
+
+def _normalize_capacity_value(value, fallback=6):
+    try:
+        val = int(value)
+    except Exception:
+        return fallback
+    return max(1, min(6, val))
+
+
+def load_room_capacity():
+    """Load persisted room capacity limits from disk or fall back to defaults."""
+    global ROOM_CAPACITY
+    caps = {}
+    try:
+        with open(ROOM_CAPACITY_FILE, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+            if isinstance(data, dict):
+                for room, value in data.items():
+                    caps[room] = _normalize_capacity_value(value, DEFAULT_ROOM_CAPACITY.get(room, 6))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.exception('Failed to load room capacity file: %s', exc)
+
+    for room in ROOMS.keys():
+        if room == 'lobby':
+            continue
+    caps.setdefault(room, DEFAULT_ROOM_CAPACITY.get(room, 6))
+
+    ROOM_CAPACITY = caps
+    return ROOM_CAPACITY
+
+
+def save_room_capacity():
+    try:
+        with open(ROOM_CAPACITY_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(ROOM_CAPACITY, fh, indent=2, ensure_ascii=False)
+        return True
+    except Exception as exc:
+        logger.exception('Failed to write room capacity file: %s', exc)
+        return False
+
+
+load_room_capacity()
+
 # Optional mapping of session id -> username for quick lookup
 SESSION_USERNAMES = {}
 # Optional mapping of session id -> preferred per-player delay (ms)
@@ -79,7 +140,7 @@ ROOMS_LISTENERS_LOCK = threading.Lock()
 
 def notify_rooms_update():
     """Push the current rooms map to all SSE listeners."""
-    payload = json.dumps({'rooms': ROOMS})
+    payload = json.dumps({'rooms': ROOMS, 'capacity': ROOM_CAPACITY})
     with ROOMS_LISTENERS_LOCK:
         for q in list(ROOMS_LISTENERS):
             try:
@@ -104,7 +165,7 @@ def rooms_stream():
     def gen():
         # initial state
         try:
-            yield f"data: {json.dumps({'rooms': ROOMS})}\n\n"
+            yield f"data: {json.dumps({'rooms': ROOMS, 'capacity': ROOM_CAPACITY})}\n\n"
             while True:
                 data = q.get()
                 yield f"data: {data}\n\n"
@@ -140,7 +201,14 @@ def status():
         payload = {
             'success': True,
             'rooms': {r: list(u) for r, u in ROOMS.items()},
-            'control': {'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME, 'timestamp': CONTROL_TIMESTAMP},
+            'capacity': dict(ROOM_CAPACITY),
+            'control': {
+                'owner': CONTROL_OWNER,
+                'owner_name': CONTROL_OWNER_NAME,
+                'timestamp': CONTROL_TIMESTAMP,
+                'password_required': control_password_required(),
+                'password_ok': control_password_ok_for_session()
+            },
             'you': user_payload
         }
         return jsonify(payload)
@@ -286,6 +354,27 @@ CONTROL_OWNER = None       # session id who currently owns the control
 CONTROL_OWNER_NAME = None  # human name for display
 CONTROL_TIMESTAMP = 0
 ULTRASTAR_WINDOW_ID = 0    # cached window id for UltraStar (0 = unknown/not found)
+CONTROL_PASSWORD = None    # optional password required before using control tab
+
+
+def control_password_required():
+    return bool(CONTROL_PASSWORD)
+
+
+def control_password_ok_for_session():
+    return (not CONTROL_PASSWORD) or session.get('control_password_ok') is True
+
+
+def enforce_control_password():
+    if not CONTROL_PASSWORD:
+        return None
+    if session.get('control_password_ok') is True:
+        return None
+    return jsonify({
+        'success': False,
+        'error': 'Control password required',
+        'error_code': 'control_password_required'
+    }), 403
 
 def run_xdotool_command(args):
     """Run xdotool and always target the UltraStar window.
@@ -367,10 +456,31 @@ def player_delay():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/control/auth', methods=['POST'])
+def control_auth():
+    global CONTROL_PASSWORD
+    data = request.get_json(force=True, silent=True) or {}
+    if not CONTROL_PASSWORD:
+        session['control_password_ok'] = True
+        return jsonify({'success': True, 'password_required': False, 'password_ok': True})
+    provided = data.get('password', '')
+    if isinstance(provided, str) and provided == CONTROL_PASSWORD:
+        session['control_password_ok'] = True
+        return jsonify({'success': True, 'password_required': True, 'password_ok': True})
+    session['control_password_ok'] = False
+    return jsonify({'success': False, 'error': 'Invalid control password', 'error_code': 'invalid_password'}), 403
+
+
 @app.route('/control/status', methods=['GET'])
 def control_status():
     global CONTROL_OWNER, CONTROL_OWNER_NAME, CONTROL_TIMESTAMP
-    return jsonify({'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME, 'timestamp': CONTROL_TIMESTAMP})
+    return jsonify({
+        'owner': CONTROL_OWNER,
+        'owner_name': CONTROL_OWNER_NAME,
+        'timestamp': CONTROL_TIMESTAMP,
+        'password_required': control_password_required(),
+        'password_ok': control_password_ok_for_session()
+    })
 
 
 @app.route('/control/acquire', methods=['POST'])
@@ -383,6 +493,9 @@ def control_acquire():
         # create a session id for controller
         sid = random.randint(1000000, 9999999)
         session['session_id'] = sid
+    guard = enforce_control_password()
+    if guard is not None:
+        return guard
     if CONTROL_OWNER and CONTROL_OWNER != sid:
         return jsonify({'success': False, 'error': 'Control already taken', 'owner': CONTROL_OWNER, 'owner_name': CONTROL_OWNER_NAME}), 409
     CONTROL_OWNER = sid
@@ -398,6 +511,9 @@ def control_release():
     sid = session.get('session_id')
     if not sid or CONTROL_OWNER != sid:
         return jsonify({'success': False, 'error': 'Not owner'}), 403
+    guard = enforce_control_password()
+    if guard is not None:
+        return guard
     CONTROL_OWNER = None
     CONTROL_OWNER_NAME = None
     CONTROL_TIMESTAMP = 0
@@ -413,6 +529,9 @@ def control_keystroke():
     sid = session.get('session_id')
     if not sid or CONTROL_OWNER != sid:
         return jsonify({'success': False, 'error': 'Not owner'}), 403
+    guard = enforce_control_password()
+    if guard is not None:
+        return guard
     if not key:
         return jsonify({'success': False, 'error': 'Missing key'}), 400
 
@@ -445,6 +564,9 @@ def control_text():
     sid = session.get('session_id')
     if not sid or CONTROL_OWNER != sid:
         return jsonify({'success': False, 'error': 'Not owner'}), 403
+    guard = enforce_control_password()
+    if guard is not None:
+        return guard
 
     # strategy: send 20 backspaces then type the full text
     try:
@@ -554,9 +676,62 @@ def rooms_list():
     """Return the current rooms mapping (room -> list of usernames)."""
     try:
         # Return a shallow copy to avoid accidental modifications by client
-        return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+        return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'capacity': dict(ROOM_CAPACITY)})
     except Exception as e:
         logger.exception('Failed to list rooms: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/rooms/capacity', methods=['GET'])
+def rooms_capacity_get():
+    try:
+        return jsonify({'success': True, 'capacity': dict(ROOM_CAPACITY)})
+    except Exception as e:
+        logger.exception('Failed to get room capacity: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/rooms/capacity', methods=['POST'])
+def rooms_capacity_set():
+    """Update one or more room capacities. JSON: {room: 'mic1', limit: 3} or {capacity: {mic1:3}}"""
+    try:
+        global CONTROL_OWNER
+        sid = session.get('session_id')
+        if not sid or CONTROL_OWNER != sid:
+            return jsonify({'success': False, 'error': 'Control lock required to change capacity', 'error_code': 'control_required'}), 403
+        data = request.get_json(force=True, silent=True) or {}
+        updates = {}
+        if 'capacity' in data and isinstance(data['capacity'], dict):
+            updates = data['capacity']
+        else:
+            room = data.get('room')
+            limit = data.get('limit')
+            if room:
+                updates = {room: limit}
+
+        if not updates:
+            return jsonify({'success': False, 'error': 'No capacity updates provided'}), 400
+
+        changed = {}
+        for room, value in updates.items():
+            if room not in ROOMS or room == 'lobby':
+                continue
+            if value is None:
+                continue
+            ROOM_CAPACITY[room] = _normalize_capacity_value(value, DEFAULT_ROOM_CAPACITY.get(room, 2))
+            changed[room] = ROOM_CAPACITY[room]
+
+        if not changed:
+            return jsonify({'success': False, 'error': 'No valid rooms to update'}), 400
+
+        save_room_capacity()
+        try:
+            notify_rooms_update()
+        except Exception:
+            pass
+        return jsonify({'success': True, 'capacity': dict(ROOM_CAPACITY)})
+    except Exception as e:
+        logger.exception('Failed to set room capacity: %s', e)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -593,6 +768,22 @@ def rooms_join():
         # Remove from any other rooms first
         for r, users in ROOMS.items():
             ROOMS[r] = [u for u in users if u != username]
+
+        # Enforce capacity for mic rooms (lobby is unlimited)
+        if room != 'lobby':
+            limit = ROOM_CAPACITY.get(room, DEFAULT_ROOM_CAPACITY.get(room, 2))
+            if limit and len(ROOMS[room]) >= limit:
+                rooms_snapshot = {r: list(u) for r, u in ROOMS.items()}
+                return jsonify({
+                    'success': False,
+                    'error': f'{room} is full',
+                    'error_code': 'room_full',
+                    'room': room,
+                    'members': len(ROOMS[room]),
+                    'capacity': limit,
+                    'rooms': rooms_snapshot,
+                    'capacity_map': dict(ROOM_CAPACITY)
+                }), 409
 
         # Add to target room
         ROOMS[room].append(username)
@@ -634,7 +825,13 @@ def rooms_join():
         except Exception:
             pass
         logger.info('Session %s joined room %s as %s', sid, room, username)
-        return jsonify({'success': True, 'room': room, 'name': username, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+        return jsonify({
+            'success': True,
+            'room': room,
+            'name': username,
+            'rooms': {r: list(u) for r, u in ROOMS.items()},
+            'capacity': dict(ROOM_CAPACITY)
+        })
     except Exception as e:
         logger.exception('Failed to join room: %s', e)
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -688,7 +885,7 @@ def rooms_leave():
         update_config_players()
     except Exception:
         pass
-    return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}})
+    return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'capacity': dict(ROOM_CAPACITY)})
 
 def update_config_players():
     """Update config.ini P1..P6 and [Game] Players based on ROOMS.
@@ -1242,8 +1439,11 @@ if __name__ == '__main__':
     server_group = parser.add_argument_group('Server Options')
     server_group.add_argument('--debug', action='store_true', help='Enable debug mode')
     server_group.add_argument('--skip-scan-songs', action='store_true', help='Skip scanning songs and building songs_index.json at startup')
+    server_group.add_argument('--control-password', type=str, default=None, help='Require this password before accessing the Control tab')
 
     args = parser.parse_args()
+
+    CONTROL_PASSWORD = args.control_password
 
     signal.signal(signal.SIGINT, signal_handler)
 

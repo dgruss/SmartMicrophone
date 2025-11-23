@@ -44,26 +44,8 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     printLog('Script: DOM ready');
-    const tabMic = document.getElementById('tabMic');
-    const tabSongs = document.getElementById('tabSongs');
-    const tabControl = document.getElementById('tabControl');
-    const tabSettings = document.getElementById('tabSettings');
-    const mainLobby = document.getElementById('mainLobby');
-    const settingsPanel = document.getElementById('settingsPanel');
-    // Placeholder for future tabs
-    function setActiveTab(tab) {
-        [tabMic, tabSongs, tabControl, tabSettings].forEach(btn => btn && btn.classList.remove('active'));
-        tab.classList.add('active');
-        // Only show mainLobby for now
-        mainLobby.style.display = tab === tabMic ? 'flex' : 'none';
-        if (settingsPanel) settingsPanel.style.display = tab === tabSettings ? 'flex' : 'none';
-        // TODO: show/hide other tab contents
-    }
-    tabMic.onclick = () => setActiveTab(tabMic);
-    tabSongs.onclick = () => setActiveTab(tabSongs);
-    tabControl.onclick = () => setActiveTab(tabControl);
-    if (tabSettings) tabSettings.onclick = () => setActiveTab(tabSettings);
-    setActiveTab(tabMic);
+    // Tab buttons are fully managed by the later DOMContentLoaded handler that
+    // shows/hides the main panels. Keep this block focused on debug/init only.
 });
 
 // Ensure tab switching shows the correct panels (songs/control/settings)
@@ -106,7 +88,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (tabMic) tabMic.addEventListener('click', () => showTab(tabMic));
     if (tabSongs) tabSongs.addEventListener('click', () => showTab(tabSongs));
-    if (tabControl) tabControl.addEventListener('click', () => showTab(tabControl));
+    if (tabControl) tabControl.addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        const ok = await promptForControlPasswordIfNeeded();
+        if (ok) {
+            showTab(tabControl);
+        } else if (tabMic) {
+            showTab(tabMic);
+        }
+    });
     if (tabSettings) tabSettings.addEventListener('click', () => showTab(tabSettings));
     // initialize
     showTab(tabMic);
@@ -387,6 +377,54 @@ const MICROPHONE_COLORS = [
     '#33FFA1',  // Teal
 ]
 
+const MIC_ROOM_KEYS = ['mic1', 'mic2', 'mic3', 'mic4', 'mic5', 'mic6'];
+const DEFAULT_ROOM_CAP_LIMIT = 6;
+
+window.controlPasswordState = window.controlPasswordState || {required: false, verified: false};
+
+function updateControlPasswordState(payload) {
+    if (!payload) return window.controlPasswordState;
+    const required = !!payload.password_required;
+    const verified = required ? !!payload.password_ok : true;
+    const state = window.controlPasswordState;
+    state.required = required;
+    state.verified = verified;
+    return state;
+}
+
+async function promptForControlPasswordIfNeeded(message) {
+    const state = window.controlPasswordState || {};
+    if (!state.required) return true;
+    if (state.verified) return true;
+    const promptMessage = message || 'Enter the control password:';
+    const entered = window.prompt(promptMessage);
+    if (entered === null) {
+        return false;
+    }
+    try {
+        const res = await fetch('/control/auth', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
+            body: JSON.stringify({password: entered})
+        });
+        const data = await res.json();
+        if (data && data.success) {
+            updateControlPasswordState({password_required: true, password_ok: true});
+            return true;
+        }
+        const errMsg = (data && data.error) ? data.error : 'Invalid control password.';
+        alert(errMsg);
+    } catch (e) {
+        alert('Unable to verify control password: ' + e);
+    }
+    updateControlPasswordState({password_required: true, password_ok: false});
+    return false;
+}
+
+window.updateControlPasswordState = updateControlPasswordState;
+window.promptForControlPasswordIfNeeded = promptForControlPasswordIfNeeded;
+
 
 const micHealth = {
     ui: {
@@ -555,6 +593,166 @@ document.addEventListener('DOMContentLoaded', function() {
     const saveNameBtn = document.getElementById('saveNameBtn');
     const micBoxes = Array.from(document.querySelectorAll('.micBox'));
     const lobbyNamesDiv = document.getElementById('lobbyNames');
+    const roomMessageBanner = document.getElementById('roomMessage');
+    const capacitySlider = document.getElementById('capacitySlider');
+    const capacityValueLabel = document.getElementById('capacityValue');
+    const capacityEditStatus = document.getElementById('capacityEditStatus');
+    let capacityEditingEnabled = false;
+    let roomCapacity = {};
+    MIC_ROOM_KEYS.forEach(key => { roomCapacity[key] = DEFAULT_ROOM_CAP_LIMIT; });
+
+    function applyCapacityEditState(enabled, opts = {}) {
+        const nextState = !!enabled;
+        if (!opts.force && capacityEditingEnabled === nextState) return;
+        capacityEditingEnabled = nextState;
+        if (capacitySlider) {
+            capacitySlider.disabled = !capacityEditingEnabled;
+        }
+        if (capacityEditStatus) {
+            capacityEditStatus.textContent = capacityEditingEnabled
+                ? 'You currently control the screen and can change channel limits.'
+                : 'Acquire control to change channel limits.';
+        }
+    }
+
+    window.setCapacityControlEditable = function(enabled) {
+        applyCapacityEditState(enabled, {force: true});
+    };
+
+    function clampCapacityValue(val) {
+        let num = Number(val);
+        if (!Number.isFinite(num)) num = DEFAULT_ROOM_CAP_LIMIT;
+        return Math.min(6, Math.max(1, Math.round(num)));
+    }
+
+    function formatCapacityLabel(val) {
+        const num = clampCapacityValue(val);
+        return `${num} ${num === 1 ? 'singer' : 'singers'}`;
+    }
+
+    function prettyRoomName(room) {
+        if (!room) return 'Room';
+        if (room === 'lobby') return 'Lobby';
+        const idx = MIC_ROOM_KEYS.indexOf(room);
+        return idx >= 0 ? `Mic ${idx + 1}` : room;
+    }
+
+    function showRoomMessage(text, options = {}) {
+        if (!roomMessageBanner) return;
+        if (!text) {
+            roomMessageBanner.style.display = 'none';
+            return;
+        }
+        roomMessageBanner.textContent = text;
+        roomMessageBanner.dataset.severity = options.severity || 'info';
+        roomMessageBanner.style.display = 'block';
+    }
+
+    function getUnifiedCapacityValue() {
+        let found = null;
+        for (const room of MIC_ROOM_KEYS) {
+            const limit = roomCapacity[room];
+            if (Number.isFinite(limit)) {
+                found = clampCapacityValue(limit);
+                break;
+            }
+        }
+        return found ?? DEFAULT_ROOM_CAP_LIMIT;
+    }
+
+    function syncCapacitySlider() {
+        if (!capacitySlider) return;
+        const value = String(getUnifiedCapacityValue());
+        if (capacitySlider.value !== value) {
+            capacitySlider.value = value;
+        }
+        if (capacityValueLabel) {
+            capacityValueLabel.textContent = formatCapacityLabel(value);
+        }
+    }
+
+    function setRoomCapacityState(nextCaps, opts = {}) {
+        if (!nextCaps) return;
+        let changed = false;
+        MIC_ROOM_KEYS.forEach(room => {
+            if (nextCaps[room] == null) return;
+            const normalized = clampCapacityValue(nextCaps[room]);
+            if (roomCapacity[room] !== normalized) {
+                roomCapacity[room] = normalized;
+                changed = true;
+            }
+        });
+        if (changed || opts.forceSync) {
+            syncCapacitySlider();
+            try { updateRoomDisplays(); } catch (e) {}
+        }
+    }
+
+    async function sendCapacityUpdate(limit) {
+        if (capacitySlider) capacitySlider.disabled = true;
+        if (!capacityEditingEnabled) {
+            showRoomMessage('Acquire control to change channel limits.', {severity: 'warn'});
+            syncCapacitySlider();
+            if (capacitySlider) capacitySlider.disabled = true;
+            return;
+        }
+        const normalized = clampCapacityValue(limit);
+        const payload = {capacity: {}};
+        MIC_ROOM_KEYS.forEach(room => {
+            payload.capacity[room] = normalized;
+        });
+        try {
+            const res = await fetch('/rooms/capacity', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'include',
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data && data.success && data.capacity) {
+                setRoomCapacityState(data.capacity, {forceSync: true});
+                showRoomMessage(`All mic rooms now allow ${formatCapacityLabel(normalized)}.`, {severity: 'info'});
+            } else {
+                const errMsg = (data && data.error) ? data.error : 'Unknown capacity error';
+                showRoomMessage(errMsg, {severity: 'warn'});
+                throw new Error(errMsg);
+            }
+        } catch (e) {
+            printLog('Failed to update capacity: ' + e);
+            syncCapacitySlider();
+        } finally {
+            if (capacitySlider) capacitySlider.disabled = !capacityEditingEnabled;
+        }
+    }
+
+    function initCapacitySlider() {
+        if (!capacitySlider || capacitySlider.dataset.ready === 'true') return;
+        capacitySlider.value = String(getUnifiedCapacityValue());
+        capacitySlider.disabled = !capacityEditingEnabled;
+        if (capacityValueLabel) {
+            capacityValueLabel.textContent = formatCapacityLabel(capacitySlider.value);
+        }
+        capacitySlider.addEventListener('input', () => {
+            if (capacityValueLabel) {
+                capacityValueLabel.textContent = formatCapacityLabel(capacitySlider.value);
+            }
+        });
+        capacitySlider.addEventListener('change', () => {
+            const normalized = clampCapacityValue(capacitySlider.value);
+            capacitySlider.value = String(normalized);
+            if (capacityValueLabel) {
+                capacityValueLabel.textContent = formatCapacityLabel(normalized);
+            }
+            sendCapacityUpdate(normalized);
+        });
+        capacitySlider.dataset.ready = 'true';
+        applyCapacityEditState(capacityEditingEnabled, {force: true});
+        syncCapacitySlider();
+    }
+
+    initCapacitySlider();
+    applyCapacityEditState(false, {force: true});
+    showRoomMessage('Tap a mic to join a channel.');
     initMicHealthUI();
     setMicStatusMessage('Waiting for microphone permission…', {severity: 'info'});
 
@@ -604,7 +802,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!silent) {
                 printLog('Please set your name before joining a room.');
             }
-            return false;
+            return {success: false, reason: 'no_name'};
         }
         desiredRoom = roomName;
         suppressAutoRoomRejoin(options.suppressMs || 4000);
@@ -625,6 +823,9 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = await res.json();
             if (data && data.success) {
                 rooms = data.rooms || rooms;
+                if (data.capacity) {
+                    setRoomCapacityState(data.capacity, {forceSync: true});
+                }
                 if (data.name) {
                     userName = data.name;
                     localStorage.setItem('userName', userName);
@@ -636,16 +837,45 @@ document.addEventListener('DOMContentLoaded', function() {
                     printLog(`Joined ${serverRoom} (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
                 }
                 updateRoomDisplays();
-                return true;
-            } else if (!silent) {
-                printLog('Server join failed: ' + (data && data.error));
+                if (!silent) {
+                    const limit = roomCapacity[serverRoom] ?? DEFAULT_ROOM_CAP_LIMIT;
+                    const count = Array.isArray(rooms[serverRoom]) ? rooms[serverRoom].length : 0;
+                    showRoomMessage(`Joined ${prettyRoomName(serverRoom)} (${count}/${limit}).`, {severity: 'ok'});
+                }
+                return {success: true};
+            } else {
+                if (data && data.capacity_map) {
+                    setRoomCapacityState(data.capacity_map, {forceSync: true});
+                }
+                if (data && data.rooms) {
+                    rooms = data.rooms;
+                    updateRoomDisplays();
+                }
+                let failureReason = 'server_error';
+                if (!silent) {
+                    if (data && data.error_code === 'room_full') {
+                        const limit = data.capacity || roomCapacity[roomName] || DEFAULT_ROOM_CAP_LIMIT;
+                        const count = data.members ?? (Array.isArray(rooms[roomName]) ? rooms[roomName].length : 0);
+                        const message = `${prettyRoomName(roomName)} is full (${count}/${limit}).`;
+                        showRoomMessage(message, {severity: 'warn'});
+                        printLog(message);
+                        failureReason = 'room_full';
+                    } else {
+                        const errMsg = data && data.error ? data.error : 'Server join failed';
+                        showRoomMessage(errMsg, {severity: 'warn'});
+                        printLog(errMsg);
+                    }
+                }
+                return {success: false, reason: failureReason};
             }
         } catch (e) {
             if (!silent) {
                 printLog('Server join error: ' + e);
+                showRoomMessage('Unable to reach server: ' + e, {severity: 'warn'});
             }
+            return {success: false, reason: 'network', error: e};
         }
-        return false;
+        return {success: false, reason: 'unknown'};
     }
 
     let membershipCheckPromise = null;
@@ -863,8 +1093,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     async function joinLobby(options = {}) {
         const { silent = false } = options;
-        const success = await attemptServerJoin('lobby', {silent});
-        if (success) return;
+    const joinRes = await attemptServerJoin('lobby', {silent});
+    if (joinRes && joinRes.success) return;
 
         if (!silent) {
             printLog(`You joined the lobby. Current lobby users: [${rooms.lobby.join(', ')}]`);
@@ -878,8 +1108,8 @@ document.addEventListener('DOMContentLoaded', function() {
     async function selectMicBox(micNum, options = {}) {
         const { silent = false } = options;
         const target = 'mic' + micNum;
-        const success = await attemptServerJoin(target, {silent});
-        if (success) return;
+    const joinRes = await attemptServerJoin(target, {silent});
+    if (joinRes && joinRes.success) return;
 
         // Fallback to local-only behavior if server not available
         Object.keys(rooms).forEach(room => { rooms[room] = rooms[room].filter(u => u !== userName); });
@@ -906,9 +1136,15 @@ document.addEventListener('DOMContentLoaded', function() {
         micBoxes.forEach((box, idx) => {
             let roomName = 'mic' + (idx + 1);
             let userSpan = box.querySelector('.micUser');
-            if (rooms[roomName].length > 0) {
+            const labelEl = box.querySelector('.micLabel');
+            const currentMembers = Array.isArray(rooms[roomName]) ? rooms[roomName] : [];
+            const limit = roomCapacity[roomName] ?? DEFAULT_ROOM_CAP_LIMIT;
+            if (labelEl) {
+                labelEl.textContent = `Mic ${idx + 1} (${currentMembers.length}/${limit})`;
+            }
+            if (currentMembers.length > 0) {
                 box.classList.add('occupied');
-                userSpan.innerHTML = rooms[roomName].map(n => n === userName ? `<strong>${n}</strong>` : n).join(', ');
+                userSpan.innerHTML = currentMembers.map(n => n === userName ? `<strong>${n}</strong>` : n).join(', ');
             } else {
                 box.classList.remove('occupied');
                 userSpan.innerHTML = '';
@@ -954,6 +1190,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     updateRoomDisplays();
                     ensureRoomMembership('poll');
                 }
+                if (data.capacity) {
+                    setRoomCapacityState(data.capacity);
+                }
                 if (data.you) {
                     const reported = data.you.room || null;
                     if (reported) {
@@ -972,6 +1211,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     controlName = data.control.owner_name;
                     // update control UI if the control tab is present
                     try { updateControlUI(); } catch (e) {}
+                    try { updateControlPasswordState(data.control); } catch (e) {}
                 }
             }
         } catch (e) {
@@ -1119,6 +1359,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                         ensureRoomMembership('sse');
                         printLog('Received SSE rooms update');
+                    }
+                    if (payload && payload.capacity) {
+                        setRoomCapacityState(payload.capacity);
                     }
                 } catch (e) { /* ignore parse errors */ }
             });
@@ -1374,6 +1617,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let controlName = null;
 
     function updateControlUI() {
+        const localName = localStorage.getItem('userName') || '';
+        const hasLock = !!controlOwner && !!controlName && !!localName && (controlName === localName);
         if (!controlOwner) {
             controlOwnerDiv.textContent = 'Control: free';
             controlAcquireBtn.style.display = 'inline-block';
@@ -1383,7 +1628,14 @@ document.addEventListener('DOMContentLoaded', function() {
             controlOwnerDiv.textContent = `Control: ${controlName || controlOwner}`;
             controlAcquireBtn.style.display = 'none';
             if (controlReleaseBtn) controlReleaseBtn.style.display = 'inline-block';
-            if (controlTextInput) controlTextInput.disabled = (localStorage.getItem('userName') !== controlName);
+            if (controlTextInput) controlTextInput.disabled = !hasLock;
+        }
+        if (typeof window.setCapacityControlEditable === 'function') {
+            try {
+                window.setCapacityControlEditable(hasLock);
+            } catch (e) {
+                // ignore
+            }
         }
     }
 
@@ -1394,6 +1646,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (data) {
                 controlOwner = data.owner;
                 controlName = data.owner_name;
+                try { updateControlPasswordState(data); } catch (e) {}
                 updateControlUI();
             }
         } catch (e) {

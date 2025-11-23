@@ -188,6 +188,7 @@
       <div class="micBox" id="box-mic5"><span class="micLabel">Mic 5</span><span class="micUser"></span></div>
       <div class="micBox" id="box-mic6"><span class="micLabel">Mic 6</span><span class="micUser"></span></div>
     </div>
+  <div id="roomMessage" class="roomMessage" style="display:none; width:100%; max-width:480px; margin-top:14px; padding:12px 14px; border-radius:12px; font-size:0.95em; text-align:left;">Room updates will appear here.</div>
   <div id="micHealthCard" style="margin-top:18px; width:100%; max-width:480px; background:#ffffff; border-radius:16px; padding:16px; box-shadow:0 3px 14px rgba(0,0,0,0.08); display:flex; flex-direction:column; gap:12px; border:2px solid #e2e8f0;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div style="font-weight:600; color:#1f2937;">Microphone status</div>
@@ -257,6 +258,15 @@
         <input id="controlTextInput" type="text" placeholder="Type here to send text to game" style="width:100%; padding:10px; font-size:1em; border-radius:8px; border:1px solid #ddd; display:block;">
         <button id="SearchBtn" class="kbd-btn kbd-special" style="position:absolute; top:170px; left:10px; width:80px; background-color: #45a049;flex:0 0 auto; z-index:10;">Search</button>
         <div id="keyboardButtons" style="display:flex; flex-wrap:wrap; gap:6px; justify-content:center; max-width:680px;"></div>
+        <div id="capacityCard" style="width:100%; text-align:left; margin-top:12px; background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+          <h3 style="margin-top:0;">Channel capacity</h3>
+          <p id="capacityEditStatus" style="font-size:0.9em; color:#555; margin-bottom:12px;">Acquire control to change channel limits.</p>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-weight:600;">Max singers per mic</span>
+            <span id="capacityValue" style="font-size:0.9em; font-weight:500; color:#1f2937;">6 singers</span>
+          </div>
+          <input id="capacitySlider" type="range" min="1" max="6" step="1" value="6" style="width:100%;">
+        </div>
       </div>
 
     </div>
@@ -312,6 +322,10 @@
     #micHealthCard[data-severity="warn"] { border-color:#f97316; box-shadow:0 4px 18px rgba(249,115,22,0.25); }
     #micHealthCard[data-severity="ok"] { border-color:#22c55e; box-shadow:0 4px 18px rgba(34,197,94,0.25); }
     #micHealthCard button { cursor:pointer; }
+    .roomMessage { background:#e2e8f0; color:#1f2937; border:1px solid #cbd5f5; }
+    .roomMessage[data-severity="warn"] { background:#fef3c7; border-color:#fcd34d; color:#92400e; }
+    .roomMessage[data-severity="ok"] { background:#dcfce7; border-color:#86efac; color:#166534; }
+    #capacityCard input[type="range"] { accent-color:#4CAF50; }
     .tabBtn {
       border-radius: 12px 12px 0 0;
       background: #e9e9e9;
