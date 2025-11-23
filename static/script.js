@@ -388,6 +388,165 @@ const MICROPHONE_COLORS = [
 ]
 
 
+const micHealth = {
+    ui: {
+        card: null,
+        levelFill: null,
+        levelValue: null,
+        message: null,
+        reloadBtn: null
+    },
+    audioContext: null,
+    analyser: null,
+    dataArray: null,
+    raf: null,
+    source: null,
+    stream: null,
+    silenceStart: null,
+    warningShown: false,
+    reloadPromptShown: false
+};
+
+function initMicHealthUI() {
+    if (micHealth.ui.card) return;
+    micHealth.ui.card = document.getElementById('micHealthCard');
+    micHealth.ui.levelFill = document.getElementById('micLevelFill');
+    micHealth.ui.levelValue = document.getElementById('micLevelValue');
+    micHealth.ui.message = document.getElementById('micStatusMessage');
+    micHealth.ui.reloadBtn = document.getElementById('micReloadBtn');
+    if (micHealth.ui.reloadBtn && !micHealth.ui.reloadBtn.dataset.bound) {
+        micHealth.ui.reloadBtn.dataset.bound = 'true';
+        micHealth.ui.reloadBtn.addEventListener('click', () => {
+            try { window.location.reload(); } catch (e) { location.href = location.href; }
+        });
+    }
+}
+
+function setMicStatusMessage(text, options = {}) {
+    initMicHealthUI();
+    const ui = micHealth.ui;
+    if (ui.message) {
+        ui.message.textContent = text || '';
+    }
+    if (ui.card) {
+        ui.card.dataset.severity = options.severity || 'info';
+    }
+    if (ui.reloadBtn) {
+        ui.reloadBtn.style.display = options.showReload ? 'inline-flex' : 'none';
+    }
+}
+
+function showMicReloadPrompt(reason, options = {}) {
+    if (options.sticky) {
+        micHealth.reloadPromptShown = true;
+    }
+    setMicStatusMessage(reason || 'Please reload this page to activate your microphone completely.', {
+        severity: 'warn',
+        showReload: true
+    });
+}
+
+function stopMicMeter() {
+    if (micHealth.raf) {
+        cancelAnimationFrame(micHealth.raf);
+        micHealth.raf = null;
+    }
+    if (micHealth.source) {
+        try { micHealth.source.disconnect(); } catch (e) {}
+        micHealth.source = null;
+    }
+    micHealth.stream = null;
+    micHealth.silenceStart = null;
+    micHealth.warningShown = false;
+    if (micHealth.ui.levelFill) {
+        micHealth.ui.levelFill.style.transform = 'scaleX(0)';
+    }
+    if (micHealth.ui.levelValue) {
+        micHealth.ui.levelValue.textContent = '--';
+    }
+}
+
+function startMicLevelLoop() {
+    if (!micHealth.analyser) return;
+    if (!micHealth.dataArray || micHealth.dataArray.length !== micHealth.analyser.fftSize) {
+        micHealth.dataArray = new Uint8Array(micHealth.analyser.fftSize);
+    }
+    const step = () => {
+        micHealth.analyser.getByteTimeDomainData(micHealth.dataArray);
+        let sum = 0;
+        for (let i = 0; i < micHealth.dataArray.length; i++) {
+            const v = (micHealth.dataArray[i] - 128) / 128;
+            sum += v * v;
+        }
+        const rms = Math.sqrt(sum / micHealth.dataArray.length);
+        const level = Math.min(1, rms * 2);
+        if (micHealth.ui.levelFill) {
+            micHealth.ui.levelFill.style.transform = `scaleX(${level})`;
+            micHealth.ui.levelFill.style.background = level > 0.6 ? '#22c55e' : (level > 0.3 ? '#facc15' : '#f97316');
+        }
+        if (micHealth.ui.levelValue) {
+            micHealth.ui.levelValue.textContent = `${Math.round(level * 100)}%`;
+        }
+        const now = performance.now();
+        const silenceThreshold = 0.02;
+        if (level < silenceThreshold) {
+            if (!micHealth.silenceStart) {
+                micHealth.silenceStart = now;
+            } else if (!micHealth.warningShown && now - micHealth.silenceStart > 5000) {
+                micHealth.warningShown = true;
+                showMicReloadPrompt('We are not receiving audio from your mic. Please reload to wake it up.');
+            }
+        } else {
+            micHealth.silenceStart = null;
+            if (!micHealth.reloadPromptShown) {
+                setMicStatusMessage('Microphone is sending audio.', {severity: 'ok', showReload: false});
+            }
+        }
+        micHealth.raf = requestAnimationFrame(step);
+    };
+    if (micHealth.raf) cancelAnimationFrame(micHealth.raf);
+    micHealth.raf = requestAnimationFrame(step);
+}
+
+function attachMicStreamToMeter(stream) {
+    try { initMicHealthUI(); } catch (e) {}
+    micHealth.stream = stream;
+    micHealth.warningShown = false;
+    micHealth.silenceStart = null;
+    if (!micHealth.audioContext) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) {
+            setMicStatusMessage('Audio meter unsupported in this browser.', {severity: 'info'});
+            return;
+        }
+        micHealth.audioContext = new AudioCtx();
+    }
+    try { micHealth.audioContext.resume(); } catch (e) {}
+    if (micHealth.source) {
+        try { micHealth.source.disconnect(); } catch (e) {}
+    }
+    micHealth.source = micHealth.audioContext.createMediaStreamSource(stream);
+    micHealth.analyser = micHealth.audioContext.createAnalyser();
+    micHealth.analyser.fftSize = 2048;
+    micHealth.source.connect(micHealth.analyser);
+    setMicStatusMessage('Listening for audio…', {severity: 'info'});
+    startMicLevelLoop();
+}
+
+function handleFirstPermissionReloadHint() {
+    if (micHealth.reloadPromptShown) return;
+    try {
+        const key = 'micPermissionEverGranted';
+        const seen = localStorage.getItem(key) === 'true';
+        if (!seen) {
+            localStorage.setItem(key, 'true');
+            showMicReloadPrompt('Mic permission granted! Reload once to make the audio path stable.', {sticky: true});
+        }
+    } catch (e) {
+        showMicReloadPrompt('Mic permission granted! Reload once to make the audio path stable.', {sticky: true});
+    }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     let userName = localStorage.getItem('userName') || "";
     const nameEntry = document.getElementById('nameEntry');
@@ -396,6 +555,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const saveNameBtn = document.getElementById('saveNameBtn');
     const micBoxes = Array.from(document.querySelectorAll('.micBox'));
     const lobbyNamesDiv = document.getElementById('lobbyNames');
+    initMicHealthUI();
+    setMicStatusMessage('Waiting for microphone permission…', {severity: 'info'});
 
     // Demo: room membership
     let rooms = {
@@ -867,9 +1028,12 @@ document.addEventListener('DOMContentLoaded', function() {
             } catch (e) {}
             const localStream = await navigator.mediaDevices.getUserMedia({audio: audioConstraints, video: false});
             localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+            attachMicStreamToMeter(localStream);
+            handleFirstPermissionReloadHint();
         } catch (e) {
             printLog('getUserMedia failed: ' + e);
             // proceed without local audio if permission denied
+            showMicReloadPrompt('Microphone permission failed. Reload and grant access.');
         }
 
         // monitor ICE connection state for automatic reconnect attempts
@@ -900,6 +1064,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const answer = {type: 'answer', sdp: answerSDP};
         await pc.setRemoteDescription(answer);
         printLog('WebRTC session started successfully');
+        setMicStatusMessage('Microphone connected to the server.', {severity: 'ok'});
         return pc;
     }
 
@@ -1162,6 +1327,10 @@ function stopSession() {
     printLog('Stopping session...')
 
     setStatus('Disconnecting...');
+    stopMicMeter();
+    if (!micHealth.reloadPromptShown) {
+        setMicStatusMessage('Microphone idle.', {severity: 'info'});
+    }
 
     const params = new URLSearchParams();
     params.append('action', 'stop_microphone');
