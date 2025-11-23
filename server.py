@@ -71,6 +71,12 @@ DEFAULT_ROOM_CAPACITY = {
 }
 ROOM_CAPACITY = {}
 
+# When True, the server runs in control-only mode (no microphone/WebRTC features)
+CONTROL_ONLY_MODE = False
+
+# Maximum characters allowed for display names (can be overridden via CLI)
+MAX_NAME_LENGTH = 16
+
 
 def _normalize_capacity_value(value, fallback=6):
     try:
@@ -202,6 +208,8 @@ def status():
             'success': True,
             'rooms': {r: list(u) for r, u in ROOMS.items()},
             'capacity': dict(ROOM_CAPACITY),
+            'audio_enabled': not CONTROL_ONLY_MODE,
+            'control_only': CONTROL_ONLY_MODE,
             'control': {
                 'owner': CONTROL_OWNER,
                 'owner_name': CONTROL_OWNER_NAME,
@@ -233,6 +241,9 @@ def index():
     global automatically_reconnect
     automatically_reconnect = False
 
+    if CONTROL_ONLY_MODE:
+        automatically_reconnect = False
+
     # On first visit, ensure session id
     player_id = session.get('session_id', None)
     if not player_id:
@@ -253,8 +264,9 @@ def api_disconnect():
     # Called from JS on page close/unload to clean up the player's source
     player_id = session.get('session_id', None)
     if player_id:
-        mgr = WebRTCMicrophoneManager()
-        mgr.remove_microphone(player_id)
+        if not CONTROL_ONLY_MODE:
+            mgr = WebRTCMicrophoneManager()
+            mgr.remove_microphone(player_id)
         session.pop('microphone_index', None)
         session.pop('microphone_start_timestamp', None)
         session.pop('session_id', None)
@@ -270,6 +282,8 @@ def api():
 
 
     if action == 'start_webrtc':
+        if CONTROL_ONLY_MODE:
+            return jsonify({'success': False, 'error': 'Server is running in control-only mode', 'error_code': 'control_only'}), 403
         # Start per-player pulse-receive using the provided SDP offer
         offer = request.form.get('offer')
         if not offer:
@@ -331,7 +345,11 @@ def static_files(path):
 
 @app.context_processor
 def inject_stage_and_region():
-    return dict(automatically_reconnect=automatically_reconnect)
+    return dict(
+        automatically_reconnect=automatically_reconnect,
+        control_only_mode=CONTROL_ONLY_MODE,
+        max_name_length=MAX_NAME_LENGTH
+    )
 
 
 def is_youngest_session():
@@ -753,6 +771,8 @@ def rooms_join():
 
         # record username and optional delay for session
         username = str(name) if name else SESSION_USERNAMES.get(sid, f'user-{sid}')
+        if isinstance(username, str):
+            username = username[:MAX_NAME_LENGTH]
         SESSION_USERNAMES[sid] = username
         # allow the client to submit a per-player delay (ms)
         try:
@@ -790,22 +810,23 @@ def rooms_join():
         SESSION_ROOMS[sid] = room
         session['current_room'] = room
 
-        # Connect the player's source to the correct sink if their microphone is running
-        mgr = WebRTCMicrophoneManager()
-        # Map room name to sink index: 'lobby' -> 0, 'mic1' -> 1, ...
+        # Determine sink index for this room and connect if audio is enabled
         sink_index = 0
         if room.startswith('mic'):
             try:
                 sink_index = int(room[3:])
             except Exception:
                 sink_index = 0
-        # Only attempt to connect if a microphone/process exists for this session
-        try:
-            if sid in mgr.microphones:
-                mgr.connect_microphone_to_sink(sid, sink_index)
-        except Exception:
-            logger.exception('Failed to connect microphone for session %s to sink %s', sid, sink_index)
-            pass
+
+        if not CONTROL_ONLY_MODE:
+            # Connect the player's source to the correct sink if their microphone is running
+            mgr = WebRTCMicrophoneManager()
+            try:
+                if sid in mgr.microphones:
+                    mgr.connect_microphone_to_sink(sid, sink_index)
+            except Exception:
+                logger.exception('Failed to connect microphone for session %s to sink %s', sid, sink_index)
+                pass
 
         try:
             session['microphone_index'] = sink_index
@@ -1189,7 +1210,8 @@ def songs_preview():
 
 def signal_handler(signum, frame):
     logger.info("Received signal %d, shutting down gracefully...", signum)
-    WebRTCMicrophoneManager().stop()
+    if not CONTROL_ONLY_MODE:
+        WebRTCMicrophoneManager().stop()
     print("Terminating server...")
     sys.exit(0)
 
@@ -1420,6 +1442,7 @@ if __name__ == '__main__':
     net_group.add_argument('--start-hotspot', type=str, default='', help='Start the given hotspot using nmcli before domain setup')
     net_group.add_argument('--internet-device', type=str, default='', help='Network interface providing internet connectivity (e.g., wlan0)')
     net_group.add_argument('--hotspot-device', type=str, default='', help='Network interface for the hotspot (e.g., wlan1)')
+    net_group.add_argument('--enable-forwarding', action='store_true', help='Add iptables forwarding/MASQUERADE rules between the internet and hotspot interfaces (requires sudo)')
     net_group.add_argument('--ssl', action='store_true', help='Enable SSL (requires --chain and --key)')
     net_group.add_argument('--chain', type=str, default=None, help='SSL chain/cert file (fullchain.pem or cert.pem)')
     net_group.add_argument('--key', type=str, default=None, help='SSL private key file (privkey.pem)')
@@ -1440,10 +1463,17 @@ if __name__ == '__main__':
     server_group.add_argument('--debug', action='store_true', help='Enable debug mode')
     server_group.add_argument('--skip-scan-songs', action='store_true', help='Skip scanning songs and building songs_index.json at startup')
     server_group.add_argument('--control-password', type=str, default=None, help='Require this password before accessing the Control tab')
+    server_group.add_argument('--control-only', action='store_true', help='Disable microphone/WebRTC features and expose control-only web UI')
+    server_group.add_argument('--max-name-length', type=int, default=16, help='Maximum characters allowed for player display names (default: 16)')
 
     args = parser.parse_args()
 
     CONTROL_PASSWORD = args.control_password
+    CONTROL_ONLY_MODE = bool(args.control_only)
+    try:
+        MAX_NAME_LENGTH = max(1, int(args.max_name_length))
+    except Exception:
+        MAX_NAME_LENGTH = 16
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -1459,9 +1489,15 @@ if __name__ == '__main__':
 
     logging.basicConfig(filename=logfile_path, level=logging.INFO if not args.debug else logging.DEBUG)
 
-    # Run iptables forwarding if both devices are provided
-    if args.internet_device and args.hotspot_device:
-        setup_iptables_forwarding(args.internet_device, args.hotspot_device)
+    # Run iptables forwarding only when explicitly requested
+    if args.enable_forwarding:
+        if args.internet_device and args.hotspot_device:
+            setup_iptables_forwarding(args.internet_device, args.hotspot_device)
+        else:
+            logger.warning('Cannot enable forwarding without both --internet-device and --hotspot-device. Skipping iptables setup.')
+    else:
+        if args.internet_device or args.hotspot_device:
+            logger.info('Interface arguments provided but --enable-forwarding not set; leaving iptables untouched as requested.')
 
     if args.start_hotspot:
         handle_start_hotspot(args.start_hotspot)
@@ -1472,7 +1508,8 @@ if __name__ == '__main__':
     if args.domain != 'localhost':
         setup_domain_hotspot_mapping(args.domain)
 
-    WebRTCMicrophoneManager()
+    if not CONTROL_ONLY_MODE:
+        WebRTCMicrophoneManager()
 
     # Start background thread to clean up stale sessions that haven't polled /status
     def stale_cleanup_loop():
@@ -1541,11 +1578,12 @@ if __name__ == '__main__':
             except Exception:
                 logger.exception('Exception in stale cleanup loop')
 
-    try:
-        t = threading.Thread(target=stale_cleanup_loop, daemon=True)
-        t.start()
-    except Exception:
-        logger.exception('Failed to start stale cleanup thread')
+    if not CONTROL_ONLY_MODE:
+        try:
+            t = threading.Thread(target=stale_cleanup_loop, daemon=True)
+            t.start()
+        except Exception:
+            logger.exception('Failed to start stale cleanup thread')
 
     # Build/update song index at startup (can be skipped with --skip-scan-songs)
     if not getattr(args, 'skip_scan_songs', False):

@@ -162,7 +162,7 @@
     var automaticallyReconnect = {{ 'true' if automatically_reconnect else 'false' }};
   </script>
 </head>
-<body>
+<body data-control-only="{{ 'true' if control_only_mode else 'false' }}" data-max-name-length="{{ max_name_length }}">
   <div id="tabBar" style="width:100vw; display:flex; justify-content:center; align-items:center; background:#f5f5f5; box-shadow:0 2px 8px rgba(0,0,0,0.06); position:fixed; top:0; left:0; z-index:10; height:54px;">
   <button class="tabBtn" id="tabMic" style="flex:1; border:none; background:none; font-size:1.1em; padding:12px 0; cursor:pointer; color:#222;">Microphone</button>
   <button class="tabBtn" id="tabSongs" style="flex:1; border:none; background:none; font-size:1.1em; padding:12px 0; cursor:pointer; color:#222;">Songs</button>
@@ -171,7 +171,7 @@
   </div>
   <div id="nameEntry" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh;">
     <h2>Enter your name</h2>
-    <input type="text" id="userNameInput" placeholder="Your name" style="font-size:2em; padding:0.5em; width:80%; max-width:300px; text-align:center;">
+  <input type="text" id="userNameInput" placeholder="Your name" maxlength="{{ max_name_length }}" style="font-size:2em; padding:0.5em; width:80%; max-width:300px; text-align:center;">
     <button id="saveNameBtn" style="font-size:1.5em; margin-top:1em;">Continue</button>
   </div>
 
@@ -204,7 +204,7 @@
 
   <!-- Settings panel (hidden by default) -->
   <div id="settingsPanel" style="display:none; flex-direction:column; align-items:center; justify-content:flex-start; min-height:50vh; width:100vw; margin-top:54px; padding:24px; box-sizing:border-box;">
-    <div style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
+    <div id="audioOptionsSection" style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
       <div style="display:flex; flex-direction:column; gap:8px;">
         <label><input type="checkbox" id="optNoiseSuppression"> Enable noise suppression</label>
         <label><input type="checkbox" id="optEchoCancellation"> Enable echo cancellation</label>

@@ -77,6 +77,7 @@ Some options perform operations that require `sudo` permission. However, SmartMi
 | `--start-hotspot <name>` | Start the given hotspot using nmcli before domain setup |
 | `--internet-device <iface>` | Network interface providing internet connectivity (e.g., wlan0), invokes sudo |
 | `--hotspot-device <iface>` | Network interface for the hotspot (e.g., wlan1), invokes sudo |
+| `--enable-forwarding` | Add iptables forwarding/MASQUERADE rules between internet/hotspot interfaces |
 | `--ssl` | Enable SSL (requires --chain and --key) |
 | `--chain <cert>` | SSL chain/cert file (fullchain.pem or cert.pem) |
 | `--key <key>` | SSL private key file (privkey.pem) |
@@ -98,6 +99,7 @@ Some options perform operations that require `sudo` permission. However, SmartMi
 | Option | Description |
 |--------|-------------|
 | `--debug` | Enable debug mode |
+| `--control-only` | Disable microphone/WebRTC capture and use the web UI for control-only workflows |
 
 ### Example: Full Setup with Hotspot and Forwarding
 ```sh

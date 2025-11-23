@@ -1,5 +1,24 @@
 // Debug output field (initialized on DOMContentLoaded)
 let debugOutputField = null;
+const CONTROL_ONLY_MODE = (() => {
+    try {
+        const body = document.body || document.documentElement;
+        const flag = body && body.dataset ? body.dataset.controlOnly : null;
+        return (flag || '').toLowerCase() === 'true';
+    } catch (e) {
+        return false;
+    }
+})();
+
+const MAX_NAME_LENGTH = (() => {
+    try {
+        const body = document.body || document.documentElement;
+        const val = body && body.dataset ? parseInt(body.dataset.maxNameLength || '16', 10) : 16;
+        return Number.isFinite(val) && val > 0 ? val : 16;
+    } catch (e) {
+        return 16;
+    }
+})();
 function printLog(msg) {
     // If textarea exists, write there; always also console.log
     if (debugOutputField) {
@@ -484,6 +503,18 @@ function showMicReloadPrompt(reason, options = {}) {
     });
 }
 
+function applyControlOnlyModeUI() {
+    try { initMicHealthUI(); } catch (e) {}
+    const card = micHealth.ui.card || document.getElementById('micHealthCard');
+    if (card) {
+        card.style.display = 'none';
+    }
+    const audioOptions = document.getElementById('audioOptionsSection');
+    if (audioOptions) {
+        audioOptions.style.display = 'none';
+    }
+}
+
 function stopMicMeter() {
     if (micHealth.raf) {
         cancelAnimationFrame(micHealth.raf);
@@ -587,6 +618,10 @@ function handleFirstPermissionReloadHint() {
 
 document.addEventListener('DOMContentLoaded', function() {
     let userName = localStorage.getItem('userName') || "";
+    if (typeof userName === 'string' && userName.length > MAX_NAME_LENGTH) {
+        userName = userName.slice(0, MAX_NAME_LENGTH);
+        try { localStorage.setItem('userName', userName); } catch (e) {}
+    }
     const nameEntry = document.getElementById('nameEntry');
     const mainLobby = document.getElementById('mainLobby');
     const userNameInput = document.getElementById('userNameInput');
@@ -755,6 +790,9 @@ document.addEventListener('DOMContentLoaded', function() {
     showRoomMessage('Tap a mic to join a channel.');
     initMicHealthUI();
     setMicStatusMessage('Waiting for microphone permission…', {severity: 'info'});
+    if (CONTROL_ONLY_MODE) {
+        applyControlOnlyModeUI();
+    }
 
     // Demo: room membership
     let rooms = {
@@ -905,12 +943,17 @@ document.addEventListener('DOMContentLoaded', function() {
         mainLobby.style.display = 'flex';
         attemptServerJoin(currentRoom || 'lobby', {silent: true}); // Ensure server keeps us in our last room
         // Start WebRTC session for this client (capture mic, send offer to server)
-        try {
-            if (!window.smartMicPC) {
-                startWebRTCSession().catch(e => printLog('WebRTC start failed: ' + e));
+        if (!CONTROL_ONLY_MODE) {
+            try {
+                if (!window.smartMicPC) {
+                    startWebRTCSession().catch(e => printLog('WebRTC start failed: ' + e));
+                }
+            } catch (e) {
+                printLog('Error starting WebRTC: ' + e);
             }
-        } catch (e) {
-            printLog('Error starting WebRTC: ' + e);
+        } else {
+            printLog('Control-only mode active: skipping WebRTC microphone startup.');
+            applyControlOnlyModeUI();
         }
         // Try to request fullscreen on page load (may be blocked if not a user gesture)
         try {
@@ -924,6 +967,10 @@ document.addEventListener('DOMContentLoaded', function() {
     if (saveNameBtn) {
         saveNameBtn.onclick = async function() {
             let val = userNameInput.value.trim();
+            if (val.length > MAX_NAME_LENGTH) {
+                val = val.slice(0, MAX_NAME_LENGTH);
+                userNameInput.value = val;
+            }
             printLog(`Name entered: ${val}`);
             if (val.length > 0) {
                 // Preserve previous room membership if present, remove old name from all records,
@@ -975,17 +1022,22 @@ document.addEventListener('DOMContentLoaded', function() {
         printLog('Warning: saveNameBtn not found');
     }
     // Load audio settings from localStorage and initialize checkboxes
-    try {
-        const ns = localStorage.getItem('optNoiseSuppression') === 'true';
-        const ec = localStorage.getItem('optEchoCancellation') === 'true';
-        const ag = localStorage.getItem('optAutoGain') === 'true';
-        const nsEl = document.getElementById('optNoiseSuppression');
-        const ecEl = document.getElementById('optEchoCancellation');
-        const agEl = document.getElementById('optAutoGain');
-        if (nsEl) { nsEl.checked = ns; nsEl.addEventListener('change', () => { localStorage.setItem('optNoiseSuppression', nsEl.checked); }); }
-        if (ecEl) { ecEl.checked = ec; ecEl.addEventListener('change', () => { localStorage.setItem('optEchoCancellation', ecEl.checked); }); }
-        if (agEl) { agEl.checked = ag; agEl.addEventListener('change', () => { localStorage.setItem('optAutoGain', agEl.checked); }); }
-    } catch (e) { }
+    if (CONTROL_ONLY_MODE) {
+        const audioOptions = document.getElementById('audioOptionsSection');
+        if (audioOptions) audioOptions.style.display = 'none';
+    } else {
+        try {
+            const ns = localStorage.getItem('optNoiseSuppression') === 'true';
+            const ec = localStorage.getItem('optEchoCancellation') === 'true';
+            const ag = localStorage.getItem('optAutoGain') === 'true';
+            const nsEl = document.getElementById('optNoiseSuppression');
+            const ecEl = document.getElementById('optEchoCancellation');
+            const agEl = document.getElementById('optAutoGain');
+            if (nsEl) { nsEl.checked = ns; nsEl.addEventListener('change', () => { localStorage.setItem('optNoiseSuppression', nsEl.checked); }); }
+            if (ecEl) { ecEl.checked = ec; ecEl.addEventListener('change', () => { localStorage.setItem('optEchoCancellation', ecEl.checked); }); }
+            if (agEl) { agEl.checked = ag; agEl.addEventListener('change', () => { localStorage.setItem('optAutoGain', agEl.checked); }); }
+        } catch (e) { }
+    }
     // Initialize delay control
     try {
         const delayKey = 'playerDelayMs';
@@ -1226,6 +1278,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Start a WebRTC session with the server: create RTCPeerConnection, capture local mic,
     // send SDP offer to server (/api?action=start_webrtc) and apply returned SDP answer.
     async function startWebRTCSession() {
+        if (CONTROL_ONLY_MODE) {
+            throw new Error('Control-only mode: WebRTC audio disabled');
+        }
         printLog('Starting WebRTC session...');
         const pc = new RTCPeerConnection();
         window.smartMicPC = pc;
@@ -1312,6 +1367,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let _reconnectAttempts = 0;
     let _reconnectTimer = null;
     function tryScheduleReconnect() {
+        if (CONTROL_ONLY_MODE) return;
         if (_reconnectTimer) return; // already scheduled
         _reconnectAttempts = Math.min(6, _reconnectAttempts + 1);
         const delay = Math.min(60, Math.pow(2, _reconnectAttempts));
@@ -1405,6 +1461,12 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function startMicrophone() {
+    if (CONTROL_ONLY_MODE) {
+        printLog('Control-only mode: blocking legacy startMicrophone request.');
+        try { setStatus('Control-only mode: microphone disabled.'); } catch (e) {}
+        applyControlOnlyModeUI();
+        return;
+    }
     if (typeof currentMicIndex === 'undefined') {
         printLog('Please select a microphone first.');
         setStatus('Please select a microphone.');
@@ -1420,6 +1482,9 @@ function startMicrophone() {
 }
 
 function createSession() {
+    if (CONTROL_ONLY_MODE) {
+        return;
+    }
     stopSession()
 
     printLog('Creating session...')
@@ -1473,6 +1538,9 @@ function createSession() {
 }
 
 function addMic(stream) {
+    if (CONTROL_ONLY_MODE) {
+        return;
+    }
     printLog('Adding microphone to session...')
 
     let track = stream.getTracks()[0]
@@ -1482,10 +1550,16 @@ function addMic(stream) {
 }
 
 function skipMic(err) {
+    if (CONTROL_ONLY_MODE) {
+        return;
+    }
     printLog('Skipping microphone configuration: '+err)
 }
 
 async function createOffer() {
+    if (CONTROL_ONLY_MODE) {
+        return;
+    }
     let offerOpts = {
         'mandatory': {
             'OfferToReceiveAudio': true,
@@ -1535,6 +1609,9 @@ async function createOffer() {
 
 
 function startSession(answer, index) {
+    if (CONTROL_ONLY_MODE) {
+        return;
+    }
     printLog('Starting session...')
     printLog('Answer: ' + answer)
 
@@ -1563,6 +1640,10 @@ function startSession(answer, index) {
 }
 
 function stopSession() {
+    if (CONTROL_ONLY_MODE) {
+        applyControlOnlyModeUI();
+        return;
+    }
     if (typeof pc === 'undefined') {
         return
     }
@@ -1615,6 +1696,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
     let controlOwner = null;
     let controlName = null;
+    let controlHasLocalLock = false;
+    let controlShadowValue = controlTextInput ? (controlTextInput.value || '') : '';
+    let controlSyncScheduled = false;
+    let controlSyncChain = Promise.resolve();
+    let controlCompositionActive = false;
 
     function updateControlUI() {
         const localName = localStorage.getItem('userName') || '';
@@ -1630,6 +1716,13 @@ document.addEventListener('DOMContentLoaded', function() {
             if (controlReleaseBtn) controlReleaseBtn.style.display = 'inline-block';
             if (controlTextInput) controlTextInput.disabled = !hasLock;
         }
+        const prevLockState = controlHasLocalLock;
+        controlHasLocalLock = hasLock;
+        if (!controlHasLocalLock) {
+            controlShadowValue = controlTextInput ? (controlTextInput.value || '') : '';
+        } else if (!prevLockState && controlHasLocalLock) {
+            scheduleControlSync('lock-gained');
+        }
         if (typeof window.setCapacityControlEditable === 'function') {
             try {
                 window.setCapacityControlEditable(hasLock);
@@ -1637,6 +1730,104 @@ document.addEventListener('DOMContentLoaded', function() {
                 // ignore
             }
         }
+    }
+
+    async function postControlKeystroke(key) {
+        if (!key) return false;
+        try {
+            const res = await fetch('/control/keystroke', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'include',
+                body: JSON.stringify({key})
+            });
+            if (!res.ok) {
+                throw new Error('HTTP ' + res.status);
+            }
+            const data = await res.json();
+            if (!data || !data.success) {
+                throw new Error((data && data.error) || 'Keystroke failed');
+            }
+            return true;
+        } catch (e) {
+            printLog('Control keystroke error: ' + e.message);
+            throw e;
+        }
+    }
+
+    async function sendBackspaces(count) {
+        let remaining = Number(count) || 0;
+        if (remaining <= 0) return;
+        while (remaining > 0) {
+            await postControlKeystroke('Backspace');
+            remaining -= 1;
+        }
+    }
+
+    async function sendTextChunk(text) {
+        if (!text) return;
+        for (const ch of text) {
+            await postControlKeystroke(ch);
+        }
+    }
+
+    function classifyControlDiff(prev, next) {
+        if (prev === next) return {type: 'none'};
+        if (next.startsWith(prev)) {
+            return {type: 'append', text: next.slice(prev.length)};
+        }
+        if (prev.startsWith(next)) {
+            return {type: 'truncate', count: prev.length - next.length};
+        }
+        return {type: 'replace'};
+    }
+
+    async function performControlSync(targetValue, reason) {
+        const prevValue = controlShadowValue || '';
+        if (targetValue === prevValue) return;
+        const diff = classifyControlDiff(prevValue, targetValue);
+        if (diff.type === 'append' && diff.text) {
+            await sendTextChunk(diff.text);
+        } else if (diff.type === 'truncate' && diff.count > 0) {
+            await sendBackspaces(diff.count);
+        } else {
+            if (prevValue.length > 0) {
+                await sendBackspaces(prevValue.length);
+            }
+            if (targetValue.length > 0) {
+                await sendTextChunk(targetValue);
+            }
+        }
+        controlShadowValue = targetValue;
+    }
+
+    function scheduleControlSync(reason) {
+        if (!controlTextInput) return;
+        if (!controlHasLocalLock) return;
+        if (controlCompositionActive) return;
+        if (controlTextInput.value === controlShadowValue) return;
+        if (controlSyncScheduled) return;
+        controlSyncScheduled = true;
+        controlSyncChain = controlSyncChain
+            .then(async () => {
+                try {
+                    while (controlHasLocalLock && !controlCompositionActive && controlTextInput && controlTextInput.value !== controlShadowValue) {
+                        const nextValue = controlTextInput.value || '';
+                        await performControlSync(nextValue, reason);
+                    }
+                } finally {
+                    controlSyncScheduled = false;
+                }
+            })
+            .catch((err) => {
+                controlSyncScheduled = false;
+                printLog('Control sync failed: ' + err.message);
+                setTimeout(() => {
+                    if (controlHasLocalLock && !controlCompositionActive) {
+                        scheduleControlSync('retry');
+                    }
+                }, 750);
+            });
     }
 
     async function fetchControlStatus() {
@@ -1696,7 +1887,23 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             if (controlTextInput) {
                 controlTextInput.focus();
-                try { controlTextInput.setSelectionRange(controlTextInput.value.length, controlTextInput.value.length); } catch (e) {}
+                enforceControlCaretAtEnd({scrollIntoView: true});
+            }
+        } catch (e) {}
+    }
+
+    function enforceControlCaretAtEnd(options = {}) {
+        if (!controlTextInput) return;
+        try {
+            if (options.forceFocus) {
+                controlTextInput.focus();
+            }
+            const len = controlTextInput.value.length;
+            if (controlTextInput.selectionStart !== len || controlTextInput.selectionEnd !== len) {
+                controlTextInput.setSelectionRange(len, len);
+            }
+            if (options.scrollIntoView) {
+                controlTextInput.scrollLeft = controlTextInput.scrollWidth;
             }
         } catch (e) {}
     }
@@ -1707,6 +1914,73 @@ document.addEventListener('DOMContentLoaded', function() {
     if (controlReleaseBtn) {
         controlReleaseBtn.addEventListener('click', async () => { await releaseControl(); focusControlInput(); });
     }
+
+    if (controlTextInput) {
+        controlShadowValue = controlTextInput.value || '';
+        controlTextInput.addEventListener('input', () => {
+            if (!controlHasLocalLock) {
+                controlShadowValue = controlTextInput.value || '';
+                enforceControlCaretAtEnd();
+                return;
+            }
+            scheduleControlSync('input');
+            enforceControlCaretAtEnd();
+        });
+        controlTextInput.addEventListener('compositionstart', () => {
+            controlCompositionActive = true;
+        });
+        controlTextInput.addEventListener('compositionend', () => {
+            controlCompositionActive = false;
+            if (controlHasLocalLock) {
+                scheduleControlSync('composition');
+            }
+            enforceControlCaretAtEnd();
+        });
+        controlTextInput.addEventListener('paste', () => {
+            if (!controlHasLocalLock) return;
+            setTimeout(() => {
+                scheduleControlSync('paste');
+                enforceControlCaretAtEnd();
+            }, 0);
+        });
+        controlTextInput.addEventListener('keydown', (ev) => {
+            if (!controlHasLocalLock) return;
+            if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+            const specialKeys = ['Enter', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+            if (specialKeys.includes(ev.key)) {
+                ev.preventDefault();
+                postControlKeystroke(ev.key).catch(() => {});
+            }
+            setTimeout(() => enforceControlCaretAtEnd(), 0);
+        });
+        controlTextInput.addEventListener('focus', () => enforceControlCaretAtEnd({scrollIntoView: true}));
+        controlTextInput.addEventListener('click', () => enforceControlCaretAtEnd());
+        controlTextInput.addEventListener('keyup', () => enforceControlCaretAtEnd());
+        ['mousedown', 'touchstart'].forEach((evtName) => {
+            controlTextInput.addEventListener(evtName, (ev) => {
+                ev.preventDefault();
+                enforceControlCaretAtEnd({forceFocus: true, scrollIntoView: true});
+            }, {passive: false});
+        });
+        ['mouseup', 'touchend'].forEach((evtName) => {
+            controlTextInput.addEventListener(evtName, () => {
+                setTimeout(() => enforceControlCaretAtEnd({scrollIntoView: true}), 0);
+            }, {passive: evtName === 'touchend' ? false : true});
+        });
+        document.addEventListener('selectionchange', () => {
+            if (document.activeElement === controlTextInput) {
+                enforceControlCaretAtEnd();
+            }
+        });
+    }
+
+    setInterval(() => {
+        if (!controlTextInput) return;
+        if (!controlHasLocalLock) return;
+        if (controlCompositionActive) return;
+        if (controlTextInput.value === controlShadowValue) return;
+        scheduleControlSync('interval');
+    }, 1200);
 
     const searchBtn = document.getElementById('SearchBtn');
     if (searchBtn) {
@@ -1762,116 +2036,6 @@ document.addEventListener('DOMContentLoaded', function() {
     arrowsWrap.appendChild(arrowsGrid);
     keyboardButtonsDiv.appendChild(arrowsWrap);
 
-    // Send keystrokes per keydown so the input remains responsive. Implement special "search mode" triggered by 'j'.
-    if (controlTextInput) {
-        let searchMode = false;    // true when we've entered the game's search/edit mode
-
-        // initialize lastLength so we can detect deletes from mobile IME which sometimes report e.key="Process"
-        controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
-          controlTextInput.addEventListener('input', () => {
-                  controlTextInput.dataset.lastLength = String(controlTextInput.value ? controlTextInput.value.length : 0);
-          });
-
-          controlTextInput.addEventListener('keydown', (e) => {
-            // Handle entering search mode: when not in search mode and user types 'j',
-            // send the 'j' key to the game (which opens search in-game) but prevent the
-            // 'j' character from being inserted into the web input. Subsequent typing
-            // while in searchMode should appear in the input and be sent to the game.
-            let rawKey = (e.key || '').toString();
-            let rawLower = rawKey.toLowerCase();
-
-            if (rawLower == 'f3') {
-              e.preventDefault();
-              if (!searchMode) {
-                rawKey = 'J';
-                rawLower = 'j';
-              }
-              else {
-                return;
-              }
-            }
-            
-
-            // check if last character in content was removed, if so, rawKey/rawLower was backspace although the keyboard did not send it as such
-            if (searchMode && rawLower === 'process' || e.keyCode === 229) {
-                rawKey = 'backspace';
-                rawLower = 'backspace';
-            }
-
-            if (!searchMode && rawLower === 'j') {
-                // send 'j' to the game, but prevent it from appearing in the input
-                e.preventDefault();
-                const k = 'j';
-                fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: k}), credentials:'include'})
-                    .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
-                    .catch(err=>printLog('Keystroke network error: '+err));
-                searchMode = true;
-                // focus and keep input as-is for typing search text
-                return;
-            }
-
-            // While in search mode, Enter or Escape have special behavior
-            if (searchMode) {
-                if (rawLower === 'enter' || rawLower === 'return') {
-                    // send Enter to game and exit search mode (keep content)
-                    e.preventDefault();
-                    fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: 'Enter'}), credentials:'include'})
-                        .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
-                        .catch(err=>printLog('Keystroke network error: '+err));
-                    searchMode = false;
-                    return;
-                }
-                if (rawLower === 'escape' || rawLower === 'esc') {
-                    // first Escape: exit search mode but keep typed content
-                    e.preventDefault();
-                    fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: 'Escape'}), credentials:'include'})
-                        .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
-                        .catch(err=>printLog('Keystroke network error: '+err));
-                    searchMode = false;
-                    return;
-                }
-                // Otherwise allow printable chars to appear and send them as keystrokes below.
-            }
-
-            // Default per-key sending: printable characters and a few control keys
-            const allowed = ['Enter','Backspace','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'];
-            // Normalize mobile variants like 'backspace' or 'delete'
-            let keyToSend = null;
-            if (rawKey === ' ') {
-                keyToSend = 'Space';
-            } else if (rawKey.length === 1) {
-                keyToSend = rawKey;
-            } else if (rawLower === 'backspace' || rawLower === 'delete') {
-                keyToSend = 'Backspace';
-            } else if (rawLower === 'enter' || rawLower === 'return') {
-                keyToSend = 'Enter';
-            } else if (rawLower === 'escape' || rawLower === 'esc') {
-                keyToSend = 'Escape';
-            } else if (rawLower.startsWith('arrow')) {
-                // keep ArrowLeft/ArrowRight etc
-                keyToSend = rawKey;
-            }
-
-            if ((searchMode == true && keyToSend === 'Backspace') || keyToSend != 'Backspace') {
-                fetch('/control/keystroke', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key: keyToSend}), credentials:'include'})
-                    .then(r=>r.json()).then(d=>{ if (!d || !d.success) printLog('Keystroke failed: ' + (d && d.error)); })
-                    .catch(err=>printLog('Keystroke network error: '+err));
-            }
-        });
-
-        // If a paste occurs (multiple chars inserted), send the full text once.
-        controlTextInput.addEventListener('paste', (ev) => {
-            // let the paste complete and then send text
-            setTimeout(async () => {
-                const txt = controlTextInput.value || '';
-                try {
-                    const res = await fetch('/control/text', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text: txt}), credentials:'include'});
-                    const data = await res.json();
-                    if (!data || !data.success) printLog('Send text failed: ' + (data && data.error));
-                } catch (err) { printLog('Send text error: '+err); }
-            }, 50);
-        });
-    }
 
     // Poll control status every 2s
     fetchControlStatus();
