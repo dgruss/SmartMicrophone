@@ -369,8 +369,12 @@ currentMicIndex = undefined
 remoteControlUser = undefined
 
 let currentRoom = 'lobby';
+let desiredRoom = currentRoom;
+let autoRejoinSuppressedUntil = 0;
+let lastServerReportedRoom = null;
 try {
     currentRoom = localStorage.getItem('currentRoom') || 'lobby';
+    desiredRoom = currentRoom;
 } catch (e) {}
 
 const MICROPHONE_COLORS = [
@@ -404,11 +408,30 @@ document.addEventListener('DOMContentLoaded', function() {
         mic6: []
     };
 
-    function rememberCurrentRoom(roomName) {
+    function suppressAutoRoomRejoin(ms = 4000) {
+        autoRejoinSuppressedUntil = Date.now() + Math.max(0, ms);
+    }
+
+    function rememberCurrentRoom(roomName, opts = {}) {
         currentRoom = roomName || 'lobby';
+        desiredRoom = currentRoom;
+        if (opts.suppress) {
+            suppressAutoRoomRejoin(opts.suppress);
+        }
         try {
             localStorage.setItem('currentRoom', currentRoom);
         } catch (e) {}
+    }
+
+    function findRoomContainingSelf(snapshot) {
+        if (!userName) return null;
+        const source = snapshot || rooms || {};
+        for (const [roomName, members] of Object.entries(source)) {
+            if (Array.isArray(members) && members.includes(userName)) {
+                return roomName;
+            }
+        }
+        return null;
     }
 
     rememberCurrentRoom(currentRoom || 'lobby');
@@ -422,6 +445,8 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             return false;
         }
+        desiredRoom = roomName;
+        suppressAutoRoomRejoin(options.suppressMs || 4000);
         if (!silent) {
             printLog(`Attempting to join ${roomName} as ${userName}`);
         }
@@ -444,7 +469,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     localStorage.setItem('userName', userName);
                 }
                 const serverRoom = data.room || roomName;
-                rememberCurrentRoom(serverRoom);
+                rememberCurrentRoom(serverRoom, {suppress: 1500});
+                lastServerReportedRoom = serverRoom;
                 if (!silent) {
                     printLog(`Joined ${serverRoom} (server). Rooms: ${JSON.stringify(rooms)}. Your name: ${userName}`);
                 }
@@ -464,10 +490,20 @@ document.addEventListener('DOMContentLoaded', function() {
     let membershipCheckPromise = null;
     function ensureRoomMembership(source) {
         if (!userName || !currentRoom) return;
+        const now = Date.now();
+        if (now < autoRejoinSuppressedUntil) return;
         const members = rooms[currentRoom] || [];
         if (members.includes(userName)) return;
+        const locatedRoom = findRoomContainingSelf(rooms);
+        if (locatedRoom) {
+            if (locatedRoom !== currentRoom) {
+                rememberCurrentRoom(locatedRoom);
+            }
+            return;
+        }
         if (membershipCheckPromise) return;
-        membershipCheckPromise = attemptServerJoin(currentRoom, {silent: true}).finally(() => {
+        const target = desiredRoom || currentRoom || 'lobby';
+        membershipCheckPromise = attemptServerJoin(target, {silent: true, suppressMs: 2000}).finally(() => {
             membershipCheckPromise = null;
         });
     }
@@ -757,6 +793,19 @@ document.addEventListener('DOMContentLoaded', function() {
                     updateRoomDisplays();
                     ensureRoomMembership('poll');
                 }
+                if (data.you) {
+                    const reported = data.you.room || null;
+                    if (reported) {
+                        lastServerReportedRoom = reported;
+                        const now = Date.now();
+                        const serverMatchesDesired = reported === desiredRoom;
+                        if ((now >= autoRejoinSuppressedUntil) || serverMatchesDesired) {
+                            if (reported !== currentRoom) {
+                                rememberCurrentRoom(reported);
+                            }
+                        }
+                    }
+                }
                 if (data.control) {
                     controlOwner = data.control.owner;
                     controlName = data.control.owner_name;
@@ -896,6 +945,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (payload && payload.rooms) {
                         rooms = payload.rooms;
                         updateRoomDisplays();
+                        const located = findRoomContainingSelf(payload.rooms);
+                        if (located && located !== currentRoom) {
+                            const now = Date.now();
+                            if (now >= autoRejoinSuppressedUntil || located === desiredRoom) {
+                                rememberCurrentRoom(located);
+                            }
+                        }
                         ensureRoomMembership('sse');
                         printLog('Received SSE rooms update');
                     }

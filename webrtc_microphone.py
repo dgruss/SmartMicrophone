@@ -607,6 +607,7 @@ class WebRTCMicrophoneManager:
         sink_name = self.sink_names[sink_index]
         logger.debug(f"connect_microphone_to_sink: player_id={player_id}, sink_index={sink_index}, monitor_source={monitor_source}, sink_name={sink_name}")
         logger.debug(f"mic.pw_ports: {getattr(mic, 'pw_ports', None)}")
+        last_error = None
         try:
             logger.debug("Disconnecting any existing links for this microphone...")
             self.disconnect_microphone(player_id)
@@ -627,6 +628,7 @@ class WebRTCMicrophoneManager:
                         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                         logger.debug(f"pw-link (numeric) result: returncode={result.returncode}, stdout={result.stdout}, stderr={result.stderr}")
                         if result.returncode != 0:
+                            last_error = result.stderr.strip() or f'pw-link numeric failed for port {port_id}'
                             logger.error(f"pw-link (numeric) failed for {port_id}->{target_port}: {result.stderr.strip()}")
                             # collect diagnostics
                             pw_list = subprocess.run(['pw-link', '-I', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -640,9 +642,50 @@ class WebRTCMicrophoneManager:
                     )
                     return {'success': True}
         except Exception as e:
-            pass
-        logger.error(f"Error connecting monitor to sink: {e}")
-        return {'success': False, 'error': str(e)}
+            last_error = e
+            logger.exception('Error while attempting numeric pw-link connection')
+
+        # Fallback: try linking by known port name patterns when numeric ids aren't available
+        try:
+            channel_sources = {
+                'FL': [
+                    f"{monitor_source}:output_FL",
+                    f"{monitor_source}:output_fl",
+                    f"{monitor_source}:playback_FL",
+                    f"{monitor_source}:playback_fl",
+                ],
+                'FR': [
+                    f"{monitor_source}:output_FR",
+                    f"{monitor_source}:output_fr",
+                    f"{monitor_source}:playback_FR",
+                    f"{monitor_source}:playback_fr",
+                ]
+            }
+            for ch in ('FL', 'FR'):
+                target_port = f'{sink_name}:input_{ch}'
+                linked = False
+                for src in channel_sources[ch]:
+                    cmd = ['pw-link', src, target_port]
+                    logger.debug(f"Attempting pw-link (named) for channel {ch}: {' '.join(cmd)}")
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    if result.returncode == 0:
+                        linked = True
+                        break
+                    logger.debug(f"pw-link (named) failed for {src}->{target_port}: {result.stderr.strip()}")
+                if not linked:
+                    last_error = f'No matching source port found for channel {ch}'
+                    logger.error(last_error)
+                    return {'success': False, 'error': last_error}
+            self.source_connections[player_id] = sink_index
+            logger.debug(f"Connected {monitor_source} to {sink_name} via named port fallback")
+            return {'success': True}
+        except Exception as e:
+            last_error = e
+            logger.exception('Error while attempting fallback pw-link connection')
+
+        err_msg = str(last_error) if last_error else 'Unknown link error'
+        logger.error(f"Error connecting monitor to sink: {err_msg}")
+        return {'success': False, 'error': err_msg}
 
     def disconnect_microphone(self, player_id):
         """Disconnect a player's monitor source from all sinks using pw-link -d."""
