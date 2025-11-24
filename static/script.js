@@ -399,6 +399,80 @@ const MICROPHONE_COLORS = [
 const MIC_ROOM_KEYS = ['mic1', 'mic2', 'mic3', 'mic4', 'mic5', 'mic6'];
 const DEFAULT_ROOM_CAP_LIMIT = 6;
 
+const LOCK_SCREEN_VIDEOS = {
+    mic1: '/static/P1.mp4',
+    mic2: '/static/P2.mp4',
+    mic3: '/static/P3.mp4',
+    mic4: '/static/P4.mp4',
+    mic5: '/static/P5.mp4',
+    mic6: '/static/P6.mp4'
+};
+
+let lockVideoEl = null;
+let lockLabelEl = null;
+
+function ensureLockScreenElements() {
+    if (!lockVideoEl || !lockVideoEl.isConnected) {
+        lockVideoEl = document.getElementById('lockVideo');
+    }
+    if (!lockLabelEl || !lockLabelEl.isConnected) {
+        lockLabelEl = document.getElementById('lockLabel');
+    }
+}
+
+function describeRoomForLockLabel(roomKey) {
+    if (!roomKey) return '';
+    if (roomKey.startsWith('mic')) {
+        const num = roomKey.replace(/[^0-9]/g, '');
+        return num ? `Mic ${num}` : roomKey.toUpperCase();
+    }
+    return roomKey.charAt(0).toUpperCase() + roomKey.slice(1);
+}
+
+function hideLockScreenVideo() {
+    ensureLockScreenElements();
+    if (!lockVideoEl) return;
+    try { lockVideoEl.pause(); } catch (e) {}
+    try {
+        if (lockVideoEl.getAttribute('src')) {
+            lockVideoEl.removeAttribute('src');
+            lockVideoEl.load();
+        }
+    } catch (e) {}
+    if (lockVideoEl.dataset) {
+        delete lockVideoEl.dataset.currentVideo;
+    }
+    lockVideoEl.style.display = 'none';
+    if (lockLabelEl) {
+        lockLabelEl.style.display = 'none';
+    }
+}
+
+function updateLockScreenVideo(roomName) {
+    ensureLockScreenElements();
+    if (!lockVideoEl) return;
+    const key = (roomName || '').toLowerCase();
+    const clip = LOCK_SCREEN_VIDEOS[key];
+    if (!clip) {
+        hideLockScreenVideo();
+        return;
+    }
+    if (!lockVideoEl.dataset || lockVideoEl.dataset.currentVideo !== clip) {
+        if (lockVideoEl.dataset) {
+            lockVideoEl.dataset.currentVideo = clip;
+        }
+        lockVideoEl.src = clip;
+        try { lockVideoEl.load(); } catch (e) {}
+    }
+    lockVideoEl.style.display = 'block';
+    if (lockLabelEl) {
+        lockLabelEl.style.display = 'flex';
+        const label = describeRoomForLockLabel(key);
+        lockLabelEl.textContent = label ? `Lock Screen — ${label}` : 'Lock Screen';
+    }
+    try { lockVideoEl.play().catch(() => {}); } catch (e) {}
+}
+
 window.controlPasswordState = window.controlPasswordState || {required: false, verified: false};
 
 function updateControlPasswordState(payload) {
@@ -812,6 +886,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function rememberCurrentRoom(roomName, opts = {}) {
         currentRoom = roomName || 'lobby';
         desiredRoom = currentRoom;
+        updateLockScreenVideo(currentRoom);
         if (opts.suppress) {
             suppressAutoRoomRejoin(opts.suppress);
         }
@@ -1693,6 +1768,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const controlOwnerDiv = document.getElementById('controlOwner');
     const controlTextInput = document.getElementById('controlTextInput');
     const keyboardButtonsDiv = document.getElementById('keyboardButtons');
+    const controlArea = document.getElementById('controlArea');
 
     let controlOwner = null;
     let controlName = null;
@@ -1701,6 +1777,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let controlSyncScheduled = false;
     let controlSyncChain = Promise.resolve();
     let controlCompositionActive = false;
+    let playlistControlsLocked = false;
 
     function updateControlUI() {
         const localName = localStorage.getItem('userName') || '';
@@ -1709,19 +1786,22 @@ document.addEventListener('DOMContentLoaded', function() {
             controlOwnerDiv.textContent = 'Control: free';
             controlAcquireBtn.style.display = 'inline-block';
             if (controlReleaseBtn) controlReleaseBtn.style.display = 'none';
-            if (controlTextInput) controlTextInput.disabled = true;
         } else {
             controlOwnerDiv.textContent = `Control: ${controlName || controlOwner}`;
             controlAcquireBtn.style.display = 'none';
             if (controlReleaseBtn) controlReleaseBtn.style.display = 'inline-block';
-            if (controlTextInput) controlTextInput.disabled = !hasLock;
         }
+        const allowInput = hasLock && !playlistControlsLocked;
+        if (controlTextInput) controlTextInput.disabled = !allowInput;
         const prevLockState = controlHasLocalLock;
         controlHasLocalLock = hasLock;
         if (!controlHasLocalLock) {
             controlShadowValue = controlTextInput ? (controlTextInput.value || '') : '';
         } else if (!prevLockState && controlHasLocalLock) {
             scheduleControlSync('lock-gained');
+        }
+        if (keyboardButtonsDiv) {
+            keyboardButtonsDiv.classList.toggle('playlist-controls-disabled', playlistControlsLocked);
         }
         if (typeof window.setCapacityControlEditable === 'function') {
             try {
@@ -1731,6 +1811,11 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
     }
+
+    window.__setPlaylistControlsLocked = function(flag) {
+        playlistControlsLocked = !!flag;
+        updateControlUI();
+    };
 
     async function postControlKeystroke(key) {
         if (!key) return false;
@@ -2036,6 +2121,129 @@ document.addEventListener('DOMContentLoaded', function() {
     arrowsWrap.appendChild(arrowsGrid);
     keyboardButtonsDiv.appendChild(arrowsWrap);
 
+    const playlistCard = document.getElementById('playlistModeCard');
+    if (playlistCard) {
+        const playlistStatusEl = document.getElementById('playlistModeStatus');
+        const playlistCurrentEl = document.getElementById('playlistCurrentSong');
+        const playlistNextEl = document.getElementById('playlistNextSong');
+        const playlistCountdownInput = document.getElementById('playlistCountdownInput');
+        const playlistToggleBtn = document.getElementById('playlistToggleBtn');
+        const playlistAutoAddNote = document.getElementById('playlistAutoAddNote');
+        const playlistCountdownConfiguredEl = document.getElementById('playlistCountdownConfigured');
+        const playlistCountdownStateEl = document.getElementById('playlistCountdownState');
+        let playlistStatusData = null;
+
+        function renderPlaylistState(data) {
+            if (!data) return;
+            playlistStatusData = data;
+            if (playlistStatusEl) {
+                playlistStatusEl.textContent = data.status_text || data.status || 'Idle';
+            }
+            if (playlistCurrentEl) {
+                playlistCurrentEl.textContent = data.current_song || '—';
+            }
+            if (playlistNextEl) {
+                playlistNextEl.textContent = data.next_song || '—';
+            }
+            if (playlistCountdownInput && document.activeElement !== playlistCountdownInput) {
+                const secondsVal = Number(data.countdown_seconds);
+                if (Number.isFinite(secondsVal) && secondsVal > 0) {
+                    playlistCountdownInput.value = secondsVal;
+                }
+            }
+            if (playlistCountdownConfiguredEl) {
+                const configured = Number(data.countdown_seconds);
+                playlistCountdownConfiguredEl.textContent = Number.isFinite(configured) && configured > 0 ? `${configured} s` : '—';
+            }
+            if (playlistCountdownStateEl) {
+                const remaining = Number(data.countdown_remaining);
+                if (data.countdown_active && Number.isFinite(remaining)) {
+                    playlistCountdownStateEl.textContent = `${Math.max(0, remaining)} s remaining`;
+                } else {
+                    playlistCountdownStateEl.textContent = data.status_text || 'Idle';
+                }
+            }
+            if (playlistToggleBtn) {
+                playlistToggleBtn.textContent = data.enabled ? 'Disable Playlist Mode' : 'Enable Playlist Mode';
+            }
+            if (playlistCountdownInput) {
+                playlistCountdownInput.disabled = !data.enabled;
+            }
+            if (playlistAutoAddNote) {
+                playlistAutoAddNote.textContent = data.auto_added ? `Auto-added ${data.auto_added} random song${data.auto_added === 1 ? '' : 's'}` : '';
+            }
+            if (window.__setPlaylistControlsLocked) {
+                window.__setPlaylistControlsLocked(!!data.lock_controls);
+            }
+        }
+
+        let playlistFetchInFlight = false;
+        let lastPlaylistFetch = 0;
+        async function fetchPlaylistStatus(force=false) {
+            if (playlistFetchInFlight) return;
+            const now = Date.now();
+            if (!force && now - lastPlaylistFetch < 900) {
+                return;
+            }
+            playlistFetchInFlight = true;
+            try {
+                const res = await fetch('/playlist/status', {credentials: 'include'});
+                const body = await res.json();
+                if (!body || !body.success) {
+                    throw new Error((body && body.error) || 'status failed');
+                }
+                renderPlaylistState(body);
+                lastPlaylistFetch = Date.now();
+            } catch (err) {
+                printLog('Playlist status error: ' + err.message);
+            } finally {
+                playlistFetchInFlight = false;
+            }
+        }
+
+        async function togglePlaylistMode() {
+            const targetEnabled = !(playlistStatusData && playlistStatusData.enabled);
+            const payload = { enabled: targetEnabled };
+            const secondsVal = Number(playlistCountdownInput ? playlistCountdownInput.value : NaN);
+            if (Number.isFinite(secondsVal) && secondsVal > 0) {
+                payload.countdown_seconds = secondsVal;
+            }
+            try {
+                playlistToggleBtn && (playlistToggleBtn.disabled = true);
+                const res = await fetch('/playlist/toggle', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify(payload)
+                });
+                const body = await res.json();
+                if (!body || !body.success) {
+                    throw new Error((body && body.error) || 'toggle failed');
+                }
+                renderPlaylistState(body.state || body);
+            } catch (err) {
+                printLog('Playlist toggle error: ' + err.message);
+            } finally {
+                if (playlistToggleBtn) playlistToggleBtn.disabled = false;
+            }
+        }
+
+        if (playlistToggleBtn) {
+            playlistToggleBtn.addEventListener('click', togglePlaylistMode);
+        }
+        if (playlistCountdownInput) {
+            playlistCountdownInput.addEventListener('change', () => {
+                const val = Number(playlistCountdownInput.value);
+                if (!Number.isFinite(val) || val <= 0) {
+                    const fallback = (playlistStatusData && playlistStatusData.countdown_seconds) || 15;
+                    playlistCountdownInput.value = fallback;
+                }
+            });
+        }
+
+        fetchPlaylistStatus(true);
+        setInterval(() => fetchPlaylistStatus(false), 1000);
+    }
 
     // Poll control status every 2s
     fetchControlStatus();
@@ -2048,16 +2256,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
 });
 
-// Bottom video behavior: attach provided base64 mp4 and make click request fullscreen
+// Bottom video behavior: clicking the banner requests fullscreen playback
 document.addEventListener('DOMContentLoaded', function() {
     try {
         const video = document.getElementById('lockVideo');
         if (!video) return;
 
-    // Attempt autoplay to prime playback; ignore rejections due to autoplay policies
-    try { video.muted = true; video.loop = true; video.playsInline = true; try { video.play().catch(()=>{}); } catch(e){} } catch (e) {}
-
-        // clicking the video requests fullscreen for the video element
         video.addEventListener('click', async (ev) => {
             ev.stopPropagation();
             try {
@@ -2077,5 +2281,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     } catch (e) {
         console.error('Lock video init failed:', e);
+    }
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+    try {
+        updateLockScreenVideo(currentRoom);
+    } catch (e) {
+        console.warn('Failed to update lock screen video on load:', e);
     }
 });

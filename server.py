@@ -19,7 +19,37 @@ import logging
 import sys
 import socket
 import time
+import re
 
+
+
+DECODER_REGEX = re.compile(r'Using decoder FFmpeg_Decoder for "(?P<path>[^"]+)"')
+
+# Automation phase identifiers
+PHASE_IDLE = 'idle'
+PHASE_PRE_OPEN_COUNTDOWN = 'pre_open_countdown'
+PHASE_PLAYER_SELECTION_COUNTDOWN = 'player_selection_countdown'
+PHASE_AWAITING_SONG_START = 'awaiting_song_start'
+PHASE_SINGING = 'singing'
+PHASE_SCORES_COUNTDOWN = 'scores_countdown'
+PHASE_HIGHSCORE_COUNTDOWN = 'highscore_countdown'
+PHASE_AWAITING_SONG_LIST = 'awaiting_song_list'
+PHASE_NEXT_SONG_COUNTDOWN = 'next_song_countdown'
+
+PHASE_STATUS_MAP = {
+    PHASE_IDLE: 'idle',
+    PHASE_PRE_OPEN_COUNTDOWN: 'pre_open_countdown',
+    PHASE_PLAYER_SELECTION_COUNTDOWN: 'player_selection_countdown',
+    PHASE_AWAITING_SONG_START: 'awaiting_song_start',
+    PHASE_SINGING: 'singing',
+    PHASE_SCORES_COUNTDOWN: 'scores_countdown',
+    PHASE_HIGHSCORE_COUNTDOWN: 'highscore_countdown',
+    PHASE_AWAITING_SONG_LIST: 'awaiting_song_list',
+    PHASE_NEXT_SONG_COUNTDOWN: 'next_song_countdown',
+}
+
+VIDEO_PLAYING_REGEX = re.compile(r'(Playing\s+video|Video\s*:|Start\s+video)', re.IGNORECASE)
+STATUS_END_ONSHOW_REGEX = re.compile(r'STATUS:\s*End\s*\[OnShow\]', re.IGNORECASE)
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.WARNING)
@@ -60,6 +90,52 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 os.makedirs(DATA_DIR, exist_ok=True)
 ROOM_CAPACITY_FILE = os.path.join(DATA_DIR, 'room_capacity.json')
 
+
+def _countdown_overlay_script():
+    return os.path.join(BASE_DIR, 'countdown_overlay.py')
+
+
+def _launch_countdown_overlay(seconds):
+    global OVERLAY_PROCESS
+    script_path = _countdown_overlay_script()
+    if not os.path.isfile(script_path):
+        logger.warning('Countdown overlay script missing at %s; skipping overlay', script_path)
+        return
+    if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+        logger.warning('DISPLAY not set; skipping countdown overlay launch')
+        return
+    try:
+        seconds_int = max(1, int(seconds))
+    except Exception:
+        seconds_int = 15
+    with OVERLAY_LOCK:
+        if OVERLAY_PROCESS and OVERLAY_PROCESS.poll() is None:
+            try:
+                OVERLAY_PROCESS.terminate()
+            except Exception:
+                pass
+        try:
+            OVERLAY_PROCESS = subprocess.Popen([sys.executable, script_path, str(seconds_int)])
+            logger.info('Started server-side countdown overlay for %ss', seconds_int)
+        except Exception:
+            OVERLAY_PROCESS = None
+            logger.exception('Failed to launch countdown overlay via %s', script_path)
+
+
+def _stop_countdown_overlay():
+    global OVERLAY_PROCESS
+    with OVERLAY_LOCK:
+        if OVERLAY_PROCESS and OVERLAY_PROCESS.poll() is None:
+            try:
+                OVERLAY_PROCESS.terminate()
+                logger.debug('Stopped server-side countdown overlay process')
+            except Exception:
+                logger.exception('Failed to terminate countdown overlay process')
+            finally:
+                OVERLAY_PROCESS = None
+        else:
+            OVERLAY_PROCESS = None
+
 # Default per-channel capacity (can be updated at runtime via API)
 DEFAULT_ROOM_CAPACITY = {
     'mic1': 6,
@@ -77,6 +153,1027 @@ CONTROL_ONLY_MODE = False
 # Maximum characters allowed for display names (can be overridden via CLI)
 MAX_NAME_LENGTH = 16
 
+
+PLAYLIST_FILE_LOCK = threading.Lock()
+PLAYLIST_STATE_LOCK = threading.Lock()
+SONGS_BY_AUDIO = {}
+PLAYLIST_THREAD = None
+PLAYLIST_THREAD_STOP = threading.Event()
+PLAYLIST_LOG_POSITION = 0
+PLAYLIST_COUNTDOWN_DEFAULT = 15
+USDX_LOG_FILE = None
+USDX_LOG_CANDIDATES = []
+OVERLAY_PROCESS = None
+OVERLAY_LOCK = threading.Lock()
+
+
+def _default_playlist_state():
+    return {
+        'enabled': False,
+        'status': 'disabled',
+        'countdown_seconds': PLAYLIST_COUNTDOWN_DEFAULT,
+        'countdown_deadline': None,
+        'countdown_token': 0,
+        'phase_token': 0,
+        'automation_phase': PHASE_IDLE,
+        'current_index': 0,
+        'current_song': None,
+        'next_song': None,
+        'pending_index': None,
+        'pending_song': None,
+        'last_decoder_path': None,
+        'auto_added': 0,
+        'last_error': None,
+        'last_status_change': time.time(),
+        'song_started_at': None,
+        'phase_timeout': None,
+        'playlist_initialized': False,
+        'decoder_event_count': 0,
+        'decoder_last_timestamp': None,
+        'decoder_last_label': None,
+        'decoder_score_triggered': False,
+    }
+
+
+PLAYLIST_STATE = _default_playlist_state()
+
+
+def _playlist_audio_key():
+    if 'args' in globals():
+        try:
+            key = getattr(args, 'audio_format', 'm4a')
+            if key:
+                return key
+        except Exception:
+            pass
+    return 'm4a'
+
+
+def _normalize_audio_path(path):
+    if not path:
+        return None
+    candidate = path
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(BASE_DIR, candidate)
+    try:
+        return os.path.realpath(candidate)
+    except Exception:
+        return None
+
+
+def _normalize_log_candidate(path):
+    if not path:
+        return None
+    expanded = os.path.expanduser(path)
+    try:
+        resolved = os.path.realpath(expanded)
+    except Exception:
+        resolved = expanded
+    return resolved
+
+
+def _build_usdx_log_candidates(custom_path=None):
+    candidates = []
+
+    def _add(path):
+        normalized = _normalize_log_candidate(path)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    if custom_path:
+        _add(custom_path)
+
+    usdx_dir = None
+    if 'args' in globals():
+        try:
+            usdx_dir = getattr(args, 'usdx_dir', None)
+        except Exception:
+            usdx_dir = None
+    if usdx_dir:
+        if not os.path.isabs(usdx_dir):
+            usdx_dir = os.path.realpath(os.path.join(BASE_DIR, usdx_dir))
+        _add(os.path.join(usdx_dir, 'Error.log'))
+
+    _add(os.path.join(BASE_DIR, '..', 'usdx', 'Error.log'))
+    _add('~/usdx/Error.log')
+    _add(os.path.join(BASE_DIR, 'Error.log'))
+
+    return candidates
+
+
+def _set_usdx_log_file(path, seek_end=True):
+    global USDX_LOG_FILE, PLAYLIST_LOG_POSITION
+    if not path:
+        return
+    USDX_LOG_FILE = path
+    if not os.path.exists(path):
+        PLAYLIST_LOG_POSITION = 0
+        return
+    try:
+        with open(path, 'rb') as fh:
+            fh.seek(0, os.SEEK_END if seek_end else os.SEEK_SET)
+            if seek_end:
+                PLAYLIST_LOG_POSITION = fh.tell()
+            else:
+                PLAYLIST_LOG_POSITION = 0
+    except Exception:
+        PLAYLIST_LOG_POSITION = 0
+
+
+def _initialize_usdx_log_monitor(custom_path=None):
+    global USDX_LOG_CANDIDATES
+    USDX_LOG_CANDIDATES = _build_usdx_log_candidates(custom_path)
+    selected = None
+    for candidate in USDX_LOG_CANDIDATES:
+        if os.path.exists(candidate):
+            selected = candidate
+            break
+    if selected:
+        _set_usdx_log_file(selected, seek_end=True)
+        logger.info('Monitoring USDX log file: %s', selected)
+    else:
+        if USDX_LOG_CANDIDATES:
+            logger.warning('USDX log file not found yet; will monitor once available. Candidates: %s', ', '.join(USDX_LOG_CANDIDATES))
+            _set_usdx_log_file(USDX_LOG_CANDIDATES[0], seek_end=True)
+        else:
+            logger.warning('No USDX log file candidates could be determined')
+
+
+def _ensure_usdx_log_file():
+    global USDX_LOG_FILE
+    if USDX_LOG_FILE and os.path.exists(USDX_LOG_FILE):
+        return True
+    for candidate in USDX_LOG_CANDIDATES:
+        if os.path.exists(candidate):
+            if candidate != USDX_LOG_FILE:
+                logger.info('Switching USDX log monitor to %s', candidate)
+            _set_usdx_log_file(candidate, seek_end=True)
+            return True
+    return False
+
+
+def _register_song_entry(entry):
+    if not entry:
+        return
+    audio_key = _playlist_audio_key()
+    candidates = []
+    try:
+        if entry.get(audio_key):
+            candidates.append(entry.get(audio_key))
+    except Exception:
+        pass
+    for fallback in ('m4a', 'mp3', 'ogg', 'wav'):
+        if fallback == audio_key:
+            continue
+        candidate = entry.get(fallback)
+        if candidate:
+            candidates.append(candidate)
+    seen = set()
+    for candidate in candidates:
+        normalized = _normalize_audio_path(candidate)
+        if normalized and normalized not in seen:
+            SONGS_BY_AUDIO[normalized] = entry
+            seen.add(normalized)
+
+
+def playlist_file_path():
+    playlist_name = 'SmartMicSession.upl'
+    usdx_dir = '../usdx'
+    if 'args' in globals():
+        try:
+            playlist_name = args.playlist_name
+            usdx_dir = args.usdx_dir
+        except Exception:
+            pass
+    base_dir = os.path.dirname(__file__)
+    return os.path.realpath(os.path.join(base_dir, usdx_dir, 'playlists', playlist_name))
+
+
+def _read_playlist_lines_unlocked():
+    try:
+        with open(playlist_file_path(), 'r', encoding='utf-8') as fh:
+            return [l.strip() for l in fh if l.strip()]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        logger.exception('Failed to read playlist file')
+        return []
+
+
+def _write_playlist_lines_unlocked(lines):
+    path = playlist_file_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as fh:
+        for line in lines:
+            if line:
+                fh.write(line + '\n')
+
+
+def get_playlist_lines():
+    with PLAYLIST_FILE_LOCK:
+        return list(_read_playlist_lines_unlocked())
+
+
+def write_playlist_lines(lines):
+    with PLAYLIST_FILE_LOCK:
+        _write_playlist_lines_unlocked(lines)
+
+
+def normalize_playlist_label(raw):
+    if not raw:
+        return None
+    label = str(raw).strip()
+    if not label:
+        return None
+    if ' : ' in label:
+        artist, title = label.split(':', 1)
+        return f"{artist.strip()} : {title.strip()}"
+    if ' - ' in label:
+        artist, title = label.split('-', 1)
+        artist = artist.strip()
+        title = title.strip()
+        if artist and title:
+            return f"{artist} : {title}"
+    return label
+
+
+def _parse_artist_title_from_txt(entry):
+    txt_rel = entry.get('txt') if entry else None
+    if not txt_rel:
+        return None
+    try:
+        candidate_txt = txt_rel
+        if not os.path.isabs(candidate_txt):
+            candidate_txt = os.path.realpath(os.path.join(BASE_DIR, candidate_txt))
+        allowed_root = os.path.realpath(os.path.join(BASE_DIR, args.usdx_dir)) if 'args' in globals() else None
+        if allowed_root and not candidate_txt.startswith(allowed_root):
+            return None
+        if not os.path.exists(candidate_txt):
+            return None
+        artist = None
+        title = None
+        with open(candidate_txt, 'r', encoding='utf-8', errors='ignore') as fh:
+            for ln in fh:
+                s = ln.strip()
+                if not s:
+                    continue
+                up = s.upper()
+                if up.startswith('#ARTIST'):
+                    parts = s.split(':', 1)
+                    artist = parts[1].strip() if len(parts) > 1 else s[len('#ARTIST'):].strip()
+                elif up.startswith('#TITLE'):
+                    parts = s.split(':', 1)
+                    title = parts[1].strip() if len(parts) > 1 else s[len('#TITLE'):].strip()
+                if artist and title:
+                    break
+        if artist and title:
+            return f"{artist} : {title}"
+        if artist:
+            return artist
+        if title:
+            return title
+    except Exception:
+        logger.exception('Failed to parse artist/title from txt: %s', txt_rel)
+    return None
+
+
+def derive_playlist_label(entry):
+    if not entry:
+        return None
+    cached = entry.get('_playlist_label')
+    if cached:
+        return cached
+    label = _parse_artist_title_from_txt(entry)
+    if not label:
+        display = entry.get('display')
+        if display:
+            label = display
+        else:
+            txt_path = entry.get('txt')
+            if txt_path:
+                label = os.path.splitext(os.path.basename(txt_path))[0].replace('_', ' ')
+    label = normalize_playlist_label(label or '')
+    if label:
+        entry['_playlist_label'] = label
+    return label
+
+
+def _current_countdown_duration(custom_seconds=None):
+    if custom_seconds is not None:
+        try:
+            return max(1, int(custom_seconds))
+        except Exception:
+            pass
+    with PLAYLIST_STATE_LOCK:
+        base = PLAYLIST_STATE.get('countdown_seconds', PLAYLIST_COUNTDOWN_DEFAULT)
+    try:
+        return max(1, int(base))
+    except Exception:
+        return PLAYLIST_COUNTDOWN_DEFAULT
+
+
+def _activate_countdown_phase(phase, duration=None, overlay=True, timeout=None):
+    duration_val = _current_countdown_duration(duration)
+    now = time.time()
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        state['automation_phase'] = phase
+        state['status'] = PHASE_STATUS_MAP.get(phase, phase)
+        state['countdown_deadline'] = now + duration_val
+        state['countdown_token'] += 1
+        state['phase_token'] = state['countdown_token']
+        state['phase_timeout'] = now + timeout if timeout else None
+        state['last_status_change'] = now
+        token = state['countdown_token']
+    if overlay:
+        _launch_countdown_overlay(duration_val)
+    return token, duration_val
+
+
+def _activate_phase(phase, timeout=None):
+    now = time.time()
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        state['automation_phase'] = phase
+        state['status'] = PHASE_STATUS_MAP.get(phase, phase)
+        state['countdown_deadline'] = None
+        state['phase_token'] = state.get('countdown_token', 0)
+        state['phase_timeout'] = now + timeout if timeout else None
+        state['last_status_change'] = now
+        if phase == PHASE_AWAITING_SONG_START:
+            state['decoder_event_count'] = 0
+            state['decoder_last_timestamp'] = None
+            state['decoder_last_label'] = None
+            state['decoder_score_triggered'] = False
+
+
+def _set_playlist_error(message):
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        state['status'] = 'error'
+        state['automation_phase'] = PHASE_IDLE
+        state['countdown_deadline'] = None
+        state['phase_timeout'] = None
+        state['decoder_event_count'] = 0
+        state['decoder_last_timestamp'] = None
+        state['decoder_last_label'] = None
+        state['decoder_score_triggered'] = False
+        state['last_error'] = message
+        state['last_status_change'] = time.time()
+    logger.error('Playlist automation error: %s', message)
+
+
+def _append_random_song_locked(lines):
+    pool = SONGS_LIST or load_songs_index()
+    if not pool:
+        return None
+    attempts = min(64, len(pool))
+    seen = set()
+    while attempts > 0:
+        entry = random.choice(pool)
+        if not entry or entry.get('id') in seen:
+            attempts -= 1
+            continue
+        seen.add(entry.get('id'))
+        label = derive_playlist_label(entry)
+        if not label or label in lines:
+            attempts -= 1
+            continue
+        lines.append(label)
+        _write_playlist_lines_unlocked(lines)
+        entry['upl'] = True
+        try:
+            SONGS_BY_ID[str(entry.get('id'))] = entry
+        except Exception:
+            pass
+        _register_song_entry(entry)
+        return label
+        attempts -= 1
+    return None
+
+
+def append_random_song_to_playlist():
+    with PLAYLIST_FILE_LOCK:
+        lines = _read_playlist_lines_unlocked()
+        added = _append_random_song_locked(lines)
+        return added
+
+
+def ensure_playlist_has_entries(min_entries=1):
+    """Ensure playlist file has at least `min_entries` entries; return (lines, added_labels)."""
+    try:
+        min_required = max(1, int(min_entries))
+    except Exception:
+        min_required = 1
+
+    added_labels = []
+    with PLAYLIST_FILE_LOCK:
+        lines = _read_playlist_lines_unlocked()
+        while len(lines) < min_required:
+            added = _append_random_song_locked(lines)
+            if not added:
+                break
+            added_labels.append(added)
+            lines = _read_playlist_lines_unlocked()
+        result_lines = list(lines)
+    return result_lines, added_labels
+
+
+def refresh_playlist_state_cache(lines=None):
+    if lines is None:
+        lines = get_playlist_lines()
+    with PLAYLIST_STATE_LOCK:
+        idx = PLAYLIST_STATE.get('current_index', 0)
+        PLAYLIST_STATE['next_song'] = lines[idx] if idx < len(lines) else None
+        return PLAYLIST_STATE['next_song']
+
+
+def _prepare_pending_playlist_entry():
+    auto_added = False
+    appended_next_label = None
+    with PLAYLIST_STATE_LOCK:
+        target_index = max(0, int(PLAYLIST_STATE.get('current_index', 0) or 0))
+    with PLAYLIST_FILE_LOCK:
+        lines = _read_playlist_lines_unlocked()
+        if target_index >= len(lines):
+            added_label = _append_random_song_locked(lines)
+            if added_label:
+                auto_added = True
+                lines = _read_playlist_lines_unlocked()
+        if not lines:
+            return False, 'Playlist is empty'
+        if target_index >= len(lines):
+            target_index = len(lines) - 1
+        line_to_start = lines[target_index]
+        if target_index + 1 >= len(lines):
+            appended_next_label = _append_random_song_locked(lines)
+            if appended_next_label:
+                lines = _read_playlist_lines_unlocked()
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        state['pending_index'] = target_index
+        state['pending_song'] = line_to_start
+        state['next_song'] = line_to_start
+        state['phase_timeout'] = None
+        if auto_added:
+            state['auto_added'] = state.get('auto_added', 0) + 1
+        elif appended_next_label:
+            state['auto_added'] = state.get('auto_added', 0) + 1
+    logger.info('Prepared pending playlist entry index=%s label=%s (auto_added=%s appended=%s)', target_index, line_to_start, auto_added, bool(appended_next_label))
+    return True, {'lines': lines, 'target_index': target_index, 'label': line_to_start}
+
+
+def _handle_song_started(label=None, index=None, lines=None):
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        if state.get('automation_phase') != PHASE_AWAITING_SONG_START:
+            return
+        if label is None:
+            label = state.get('pending_song') or state.get('current_song')
+        if index is None:
+            index = state.get('pending_index')
+        if lines is None:
+            lines = get_playlist_lines()
+        state['automation_phase'] = PHASE_SINGING
+        state['status'] = PHASE_STATUS_MAP.get(PHASE_SINGING, 'singing')
+        state['countdown_deadline'] = None
+        state['phase_timeout'] = None
+        state['song_started_at'] = time.time()
+        state['decoder_event_count'] = 0
+        state['decoder_last_timestamp'] = None
+        state['decoder_last_label'] = label
+        state['decoder_score_triggered'] = False
+        state['current_song'] = label
+        if index is None:
+            index = state.get('current_index', 0)
+        state['current_index'] = int(index) + 1 if index is not None else state.get('current_index', 0)
+        next_idx = state['current_index']
+        if next_idx is not None and next_idx < len(lines):
+            state['next_song'] = lines[next_idx]
+        else:
+            state['next_song'] = None
+        state['pending_song'] = None
+        state['pending_index'] = None
+        state['last_error'] = None
+        state['last_status_change'] = time.time()
+    logger.info('Song playback detected; automation phase set to SINGING for "%s"', label or 'unknown')
+
+
+def _find_playlist_index_for_label(label, lines, start_at=0):
+    if not label or not lines:
+        return None
+    start_idx = max(0, int(start_at or 0))
+    for idx in range(start_idx, len(lines)):
+        if lines[idx] == label:
+            return idx
+    for idx in range(0, start_idx):
+        if lines[idx] == label:
+            return idx
+    return None
+
+
+def _process_decoder_path(audio_path):
+    normalized = _normalize_audio_path(audio_path)
+    if not normalized:
+        return
+    entry = SONGS_BY_AUDIO.get(normalized)
+    if not entry:
+        load_songs_index()
+        entry = SONGS_BY_AUDIO.get(normalized)
+    label = derive_playlist_label(entry) if entry else None
+    lines = get_playlist_lines()
+    with PLAYLIST_STATE_LOCK:
+        start_hint = max(0, PLAYLIST_STATE.get('current_index', 0) - 3)
+        PLAYLIST_STATE['last_decoder_path'] = normalized
+        automation_phase = PLAYLIST_STATE.get('automation_phase')
+        current_song = PLAYLIST_STATE.get('current_song')
+        pending_song = PLAYLIST_STATE.get('pending_song')
+        pending_index = PLAYLIST_STATE.get('pending_index')
+    active_label = label or (pending_song if automation_phase == PHASE_AWAITING_SONG_START else current_song)
+    idx = _find_playlist_index_for_label(active_label, lines, start_hint) if active_label else None
+    if idx is None:
+        idx = pending_index if automation_phase == PHASE_AWAITING_SONG_START else start_hint
+    now = time.time()
+    if automation_phase == PHASE_AWAITING_SONG_START:
+        _handle_song_started(active_label, idx, lines)
+        with PLAYLIST_STATE_LOCK:
+            state = PLAYLIST_STATE
+            state['decoder_event_count'] = 1
+            state['decoder_last_timestamp'] = now
+            state['decoder_last_label'] = active_label
+        logger.info('Song started: %s (decoder=%s)', active_label or 'unknown', normalized)
+        return
+
+    if automation_phase == PHASE_SINGING:
+        should_update_label = False
+        score_count = None
+        score_delta = None
+        score_should_trigger = False
+        with PLAYLIST_STATE_LOCK:
+            state = PLAYLIST_STATE
+            prev_song = state.get('current_song')
+            prev_ts = state.get('decoder_last_timestamp')
+            prev_count = state.get('decoder_event_count', 0) or 0
+            score_already_triggered = state.get('decoder_score_triggered', False)
+            label_matches_current = active_label == prev_song if active_label else True
+            if not label_matches_current and active_label:
+                state['current_song'] = active_label
+                if state.get('current_index', 0) < len(lines):
+                    state['next_song'] = lines[state['current_index']]
+                state['decoder_event_count'] = 1
+                state['decoder_last_timestamp'] = now
+                state['decoder_last_label'] = active_label
+                state['last_status_change'] = time.time()
+                should_update_label = True
+            else:
+                score_count = prev_count + 1
+                state['decoder_event_count'] = score_count
+                state['decoder_last_timestamp'] = now
+                state['decoder_last_label'] = active_label or prev_song
+                if prev_ts:
+                    score_delta = now - prev_ts
+                if not score_already_triggered and (score_count >= 3 or (score_delta is not None and score_delta >= 5.0)):
+                    score_should_trigger = True
+        if should_update_label:
+            logger.info('Updated current song to %s based on decoder log', label)
+            return
+        if score_should_trigger and score_count:
+            if _trigger_scores_countdown():
+                if score_delta is not None:
+                    logger.info('Detected decoder replay after song completion; starting score confirmation countdown (count=%d, Δt=%.2fs)', score_count, score_delta)
+                else:
+                    logger.info('Detected decoder replay after song completion; starting score confirmation countdown (count=%d)', score_count)
+            else:
+                logger.debug('Decoder replay detected but scores countdown already active (count=%d)', score_count)
+        return
+
+
+def playlist_status_payload(lines=None):
+    if lines is None:
+        lines = get_playlist_lines()
+    with PLAYLIST_STATE_LOCK:
+        state = dict(PLAYLIST_STATE)
+    now = time.time()
+    countdown_remaining = 0
+    if state.get('countdown_deadline'):
+        countdown_remaining = max(0, int(state['countdown_deadline'] - now))
+    countdown_active = state.get('countdown_deadline') is not None and countdown_remaining > 0
+    status_text = {
+        'disabled': 'Playlist mode disabled',
+        'idle': 'Idle — ready for next song',
+        'countdown': 'Countdown in progress',
+        'pre_open_countdown': 'Preparing playlist…',
+        'next_song_countdown': 'Next song countdown',
+        'player_selection_countdown': 'Player selection countdown',
+        'arming': 'Arming next song',
+        'awaiting_decoder': 'Starting song…',
+        'awaiting_song_start': 'Waiting for song to start…',
+        'singing': 'Song in progress',
+        'scores_countdown': 'Review scores in…',
+        'awaiting_scores_confirmation': 'Waiting to confirm scores…',
+        'highscore_countdown': 'Highscore countdown',
+        'awaiting_song_list': 'Waiting for song list…',
+        'error': 'Error'
+    }.get(state.get('status'), state.get('status', 'idle'))
+    return {
+        'enabled': state.get('enabled', False),
+        'status': state.get('status'),
+        'automation_phase': state.get('automation_phase'),
+        'status_text': status_text,
+        'current_index': state.get('current_index', 0),
+        'current_song': state.get('current_song'),
+        'next_song': state.get('next_song'),
+        'playlist_length': len(lines),
+        'countdown_seconds': state.get('countdown_seconds', PLAYLIST_COUNTDOWN_DEFAULT),
+        'countdown_remaining': countdown_remaining,
+        'countdown_active': countdown_active,
+        'last_decoder_path': state.get('last_decoder_path'),
+        'auto_added': state.get('auto_added', 0),
+        'lock_controls': state.get('enabled', False),
+        'last_error': state.get('last_error')
+    }
+
+
+def set_playlist_enabled(enabled, countdown_seconds=None):
+    logger.info(f'set_playlist_enabled: enabled={enabled}, countdown_seconds={countdown_seconds}')
+    if enabled:
+        min_required = 2
+        lines, added_labels = ensure_playlist_has_entries(min_required)
+        auto_seed_count = len(added_labels)
+        if auto_seed_count:
+            logger.info('Playlist auto-seeded with %s before enabling mode', ', '.join(added_labels))
+    else:
+        lines = get_playlist_lines()
+        auto_seed_count = 0
+    if enabled and len(lines) < 2:
+        raise RuntimeError('Playlist is empty and no songs could be auto-added')
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        state['enabled'] = bool(enabled)
+        if countdown_seconds is not None:
+            try:
+                state['countdown_seconds'] = max(1, int(countdown_seconds))
+            except Exception:
+                state['countdown_seconds'] = PLAYLIST_COUNTDOWN_DEFAULT
+        state['countdown_deadline'] = None
+        state['countdown_token'] += 1
+        state['phase_token'] = state['countdown_token']
+        state['last_error'] = None
+        state['automation_phase'] = PHASE_IDLE
+        state['phase_timeout'] = None
+        state['playlist_initialized'] = False
+        state['pending_song'] = None
+        state['pending_index'] = None
+        if not state['enabled']:
+            state['auto_added'] = 0
+        state['decoder_event_count'] = 0
+        state['decoder_last_timestamp'] = None
+        state['decoder_last_label'] = None
+        state['decoder_score_triggered'] = False
+        if state['enabled']:
+            state['status'] = 'idle'
+            state['current_index'] = 0
+            state['current_song'] = None
+            state['next_song'] = lines[0] if lines else None
+            state['auto_added'] = auto_seed_count
+        else:
+            state['status'] = 'disabled'
+            state['current_song'] = None
+            state['next_song'] = None
+    if not enabled:
+        _stop_countdown_overlay()
+    return playlist_status_payload(lines)
+
+
+def request_playlist_countdown(custom_seconds=None):
+    duration = _current_countdown_duration(custom_seconds)
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        if not state.get('enabled'):
+            return False, 'Playlist mode is not enabled'
+        phase = state.get('automation_phase', PHASE_IDLE)
+        if phase not in (PHASE_IDLE, PHASE_AWAITING_SONG_LIST):
+            return False, 'Playlist automation is busy'
+        state['countdown_seconds'] = duration
+    # Ensure playlist has entries before starting automation
+    try:
+        ensure_playlist_has_entries(2)
+    except Exception as exc:
+        logger.exception('Failed to ensure playlist entries: %s', exc)
+        return False, str(exc)
+
+    if not _is_playlist_initialized():
+        ok, error = _begin_initial_playlist_sequence(duration)
+    else:
+        ok, error = _select_next_song_with_countdown(duration)
+
+    if not ok:
+        return False, error
+
+    with PLAYLIST_STATE_LOCK:
+        token = PLAYLIST_STATE.get('countdown_token')
+    logger.info('Playlist countdown started for %ss (token=%s)', duration, token)
+    return True, token
+
+
+def trigger_playlist_sequence_immediately(custom_seconds=None):
+    """Start automation immediately by opening playlist and beginning countdown."""
+    logger.info(f'trigger_playlist_sequence_immediately: custom_seconds={custom_seconds}')
+    duration = _current_countdown_duration(custom_seconds)
+    with PLAYLIST_STATE_LOCK:
+        PLAYLIST_STATE['countdown_seconds'] = duration
+    ok, error = _begin_initial_playlist_sequence(duration)
+    if not ok:
+        return False, error
+    return True, None
+
+
+def _is_playlist_initialized():
+    with PLAYLIST_STATE_LOCK:
+        return bool(PLAYLIST_STATE.get('playlist_initialized'))
+
+
+def _begin_initial_playlist_sequence(duration):
+    ok, info = _prepare_pending_playlist_entry()
+    if not ok:
+        return False, info
+    ok, error = _send_playlist_open_sequence()
+    if not ok:
+        return False, error
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        state['playlist_initialized'] = True
+        state['automation_phase'] = PHASE_NEXT_SONG_COUNTDOWN
+    _activate_countdown_phase(PHASE_NEXT_SONG_COUNTDOWN, duration)
+    logger.info('Initial playlist sequence started; countdown to confirm song initiated')
+    return True, None
+
+
+def _select_next_song_with_countdown(duration):
+    ok, info = _prepare_pending_playlist_entry()
+    if not ok:
+        return False, info
+    ok, error = _send_playlist_select_next_song_sequence()
+    if not ok:
+        return False, error
+    _activate_countdown_phase(PHASE_NEXT_SONG_COUNTDOWN, duration)
+    logger.info('Advanced to next playlist entry; countdown before confirming song initiated')
+    return True, None
+
+
+
+def _run_playlist_command_sequence(commands):
+    for cmd in commands:
+        if cmd[0] == 'delay':
+            try:
+                delay_sec = max(0.05, float(cmd[1]))
+            except Exception:
+                delay_sec = 0.1
+            # Show countdown overlay for delays >= 2s (player selection phase)
+            if delay_sec >= 2:
+                try:
+                    _launch_countdown_overlay(int(delay_sec))
+                except Exception as e:
+                    logger.warning(f'Failed to launch overlay during playlist delay: {e}')
+            time.sleep(delay_sec)
+            continue
+        ok, out = run_xdotool_command(cmd)
+        if not ok:
+            return False, out or 'xdotool failure'
+        time.sleep(0.05)
+    return True, None
+
+
+def _send_playlist_open_sequence():
+    commands = [
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Escape'],
+        ['key', 'Return'],        # confirm default singer
+        ['key', 'p'],             # open playlist mode selector
+        ['key', 'Return'],        # start playlist mode / queue next entry
+        ['key', 'p'],             # retry open playlist mode selector
+        ['key', 'Return'],        # retry start playlist mode / queue next entry
+        ['key', 'Down'],          # move to select playlist entry
+        ['key', 'Down'],          # move to select playlist entry
+        ['key', 'Return'],        # confirm selection
+    ]
+    return _run_playlist_command_sequence(commands)
+
+def _send_playlist_confirm_song_sequence():
+    commands = [
+        ['key', 'Return']
+    ]
+    return _run_playlist_command_sequence(commands)
+
+def _send_playlist_confirm_players_sequence():
+    commands = [
+        ['key', 'Return']
+    ]
+    return _run_playlist_command_sequence(commands)
+
+def _send_playlist_confirm_scores_sequence():
+    commands = [
+        ['key', 'Return']
+    ]
+    return _run_playlist_command_sequence(commands)
+
+def _send_playlist_confirm_highscore_sequence():
+    commands = [
+        ['key', 'Return']
+    ]
+    return _run_playlist_command_sequence(commands)
+
+def _send_playlist_select_next_song_sequence():
+    commands = [
+        ['key', 'Down']
+    ]
+    return _run_playlist_command_sequence(commands)
+
+
+def _on_next_song_countdown_expired(expected_token):
+    with PLAYLIST_STATE_LOCK:
+        current_token = PLAYLIST_STATE.get('countdown_token')
+        if current_token != expected_token:
+            logger.debug('Ignoring stale next-song countdown token %s (current %s)', expected_token, current_token)
+            return
+        PLAYLIST_STATE['countdown_deadline'] = None
+    ok, error = _send_playlist_confirm_song_sequence()
+    if not ok:
+        _set_playlist_error(error or 'Failed to confirm song selection')
+        return
+    _activate_countdown_phase(PHASE_PLAYER_SELECTION_COUNTDOWN)
+    logger.info('Song confirmed; waiting on player selection countdown')
+
+
+def _on_player_selection_countdown_expired(expected_token):
+    with PLAYLIST_STATE_LOCK:
+        current_token = PLAYLIST_STATE.get('countdown_token')
+        if current_token != expected_token:
+            logger.debug('Ignoring stale player-selection countdown token %s (current %s)', expected_token, current_token)
+            return
+        PLAYLIST_STATE['countdown_deadline'] = None
+    ok, error = _send_playlist_confirm_players_sequence()
+    if not ok:
+        _set_playlist_error(error or 'Failed to confirm players')
+        return
+    _activate_phase(PHASE_AWAITING_SONG_START, timeout=120)
+    logger.info('Players confirmed; awaiting song start detection')
+
+
+def _on_scores_countdown_expired(expected_token):
+    with PLAYLIST_STATE_LOCK:
+        current_token = PLAYLIST_STATE.get('countdown_token')
+        if current_token != expected_token:
+            logger.debug('Ignoring stale scores countdown token %s (current %s)', expected_token, current_token)
+            return
+        PLAYLIST_STATE['countdown_deadline'] = None
+    ok, error = _send_playlist_confirm_scores_sequence()
+    if not ok:
+        _set_playlist_error(error or 'Failed to confirm scores')
+        return
+    duration = _current_countdown_duration()
+    _activate_countdown_phase(PHASE_HIGHSCORE_COUNTDOWN, duration)
+    logger.info('Scores confirmed; starting highscore confirmation countdown')
+
+
+def _on_highscore_countdown_expired(expected_token):
+    with PLAYLIST_STATE_LOCK:
+        current_token = PLAYLIST_STATE.get('countdown_token')
+        if current_token != expected_token:
+            logger.debug('Ignoring stale highscore countdown token %s (current %s)', expected_token, current_token)
+            return
+        PLAYLIST_STATE['countdown_deadline'] = None
+    ok, error = _send_playlist_confirm_highscore_sequence()
+    if not ok:
+        _set_playlist_error(error or 'Failed to confirm highscore screen')
+        return
+    duration = _current_countdown_duration()
+    ok, error = _select_next_song_with_countdown(duration)
+    if not ok and error:
+        _set_playlist_error(error or 'Failed to queue next song')
+        return
+    logger.info('Highscore confirmed; queued next song selection countdown')
+
+
+def _handle_phase_timeout(phase):
+    logger.warning('Playlist automation phase "%s" timed out; entering error state', phase)
+    _set_playlist_error(f'Automation timeout while waiting for {phase}')
+
+
+def _process_playlist_countdown():
+    now = time.time()
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        if not state.get('enabled'):
+            return
+        deadline = state.get('countdown_deadline')
+        token = state.get('countdown_token')
+        phase = state.get('automation_phase', PHASE_IDLE)
+        phase_timeout = state.get('phase_timeout')
+
+    if deadline and now >= deadline:
+        if phase == PHASE_NEXT_SONG_COUNTDOWN:
+            _on_next_song_countdown_expired(token)
+        elif phase == PHASE_PLAYER_SELECTION_COUNTDOWN:
+            _on_player_selection_countdown_expired(token)
+        elif phase == PHASE_SCORES_COUNTDOWN:
+            _on_scores_countdown_expired(token)
+        elif phase == PHASE_HIGHSCORE_COUNTDOWN:
+            _on_highscore_countdown_expired(token)
+        else:
+            with PLAYLIST_STATE_LOCK:
+                PLAYLIST_STATE['countdown_deadline'] = None
+        return
+
+    if (not deadline) and phase_timeout and now >= phase_timeout:
+        _handle_phase_timeout(phase)
+
+
+def _trigger_scores_countdown():
+    with PLAYLIST_STATE_LOCK:
+        state = PLAYLIST_STATE
+        if state.get('automation_phase') != PHASE_SINGING:
+            return False
+        if state.get('decoder_score_triggered'):
+            return False
+        duration = state.get('countdown_seconds', PLAYLIST_COUNTDOWN_DEFAULT)
+        state['decoder_score_triggered'] = True
+        state['phase_timeout'] = None
+    _activate_countdown_phase(PHASE_SCORES_COUNTDOWN, duration)
+    return True
+
+
+def _handle_video_playing_detected():
+    if _trigger_scores_countdown():
+        logger.info('Detected post-song video playback; starting score confirmation countdown')
+
+
+def _process_usdx_log_lines():
+    global PLAYLIST_LOG_POSITION, USDX_LOG_FILE
+    if not _ensure_usdx_log_file():
+        logger.debug('USDX log file not yet available; skipping log processing')
+        return
+    try:
+        with open(USDX_LOG_FILE, 'r', encoding='utf-8', errors='ignore') as fh:
+            file_size = fh.seek(0, os.SEEK_END)
+            if PLAYLIST_LOG_POSITION > file_size:
+                PLAYLIST_LOG_POSITION = 0
+            fh.seek(PLAYLIST_LOG_POSITION)
+            new_lines = fh.readlines()
+            PLAYLIST_LOG_POSITION = fh.tell()
+    except FileNotFoundError:
+        logger.debug('USDX log file %s disappeared; will retry', USDX_LOG_FILE)
+        USDX_LOG_FILE = None
+        PLAYLIST_LOG_POSITION = 0
+        return
+    except Exception:
+        logger.exception('Failed to read USDX log file %s', USDX_LOG_FILE)
+        return
+    if new_lines:
+        logger.debug('Read %d new lines from USDX log %s', len(new_lines), USDX_LOG_FILE)
+    for line in new_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if STATUS_END_ONSHOW_REGEX.search(stripped):
+            logger.debug('Detected STATUS End [OnShow] log line: %s', stripped)
+            _handle_song_started()
+            continue
+        match = DECODER_REGEX.search(stripped)
+        if match:
+            logger.info('Detected decoder log entry: %s', match.group('path'))
+            _process_decoder_path(match.group('path'))
+            continue
+        if VIDEO_PLAYING_REGEX.search(stripped):
+            logger.debug('Detected video playback log line: %s', stripped)
+            _handle_video_playing_detected()
+
+
+def playlist_automation_loop():
+    while not PLAYLIST_THREAD_STOP.is_set():
+        try:
+            _process_playlist_countdown()
+            _process_usdx_log_lines()
+        except Exception:
+            logger.exception('Playlist automation loop error')
+        time.sleep(0.25)
+
+
+def start_playlist_thread():
+    global PLAYLIST_THREAD, PLAYLIST_LOG_POSITION
+    if PLAYLIST_THREAD and PLAYLIST_THREAD.is_alive():
+        return
+    _ensure_usdx_log_file()
+    PLAYLIST_THREAD = threading.Thread(target=playlist_automation_loop, daemon=True)
+    PLAYLIST_THREAD.start()
 
 def _normalize_capacity_value(value, fallback=6):
     try:
@@ -602,6 +1699,16 @@ def control_text():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def require_control_lock():
+    sid = session.get('session_id')
+    if not sid or CONTROL_OWNER != sid:
+        return jsonify({'success': False, 'error': 'Control lock required', 'error_code': 'control_required'}), 403
+    guard = enforce_control_password()
+    if guard is not None:
+        return guard
+    return None
+
+
 def get_mic_assignments():
     # Returns a list of user display names or None for each mic
     result = []
@@ -650,7 +1757,12 @@ def scan_songs_and_build_index(find_root=None):
         audio_ext = args.audio_format if 'args' in globals() else 'm4a'
         audio_path = os.path.splitext(txtpath)[0] + f'.{audio_ext}'
         display = os.path.splitext(os.path.basename(txtpath))[0].replace('_', ' ')
-        entries.append({'id': i+1, 'txt': txtpath, audio_ext: audio_path, 'display': display, 'upl': False})
+        entry = {'id': i+1, 'txt': txtpath, audio_ext: audio_path, 'display': display, 'upl': False}
+        entries.append(entry)
+        try:
+            _register_song_entry(entry)
+        except Exception:
+            logger.exception('Failed to register song entry for audio map: %s', entry.get('id'))
 
     try:
         with open(index_file, 'w', encoding='utf-8') as fh:
@@ -678,6 +1790,13 @@ def load_songs_index():
             global SONGS_LIST, SONGS_BY_ID
             SONGS_LIST = items
             SONGS_BY_ID = {str(e.get('id')): e for e in items if 'id' in e}
+            try:
+                global SONGS_BY_AUDIO
+                SONGS_BY_AUDIO = {}
+                for entry in items:
+                    _register_song_entry(entry)
+            except Exception:
+                logger.exception('Failed to rebuild song audio map')
             return items
     except Exception:
         logger.exception('Failed to load song index %s', index_file)
@@ -1043,90 +2162,31 @@ def songs_add_to_upl():
         if not entry:
             return jsonify({'success': False, 'error': 'Not found', 'id': id_param}), 404
 
-        # derive line (Artist : Title) from entry by reading the .txt file and looking for #ARTIST and #TITLE
-        line = None
-        try:
-            txt_rel = entry.get('txt')
-            if txt_rel:
-                candidate_txt = os.path.realpath(os.path.join(os.path.dirname(__file__), txt_rel))
-                # ensure txt is inside allowed root (same root used for previews)
-                allowed_root = os.path.realpath(os.path.join(os.path.dirname(__file__), args.usdx_dir))
-                if candidate_txt.startswith(allowed_root) and os.path.exists(candidate_txt):
-                    artist = None
-                    title = None
-                    try:
-                        with open(candidate_txt, 'r', encoding='utf-8', errors='ignore') as fh:
-                            for ln in fh:
-                                s = ln.strip()
-                                if not s:
-                                    continue
-                                up = s.upper()
-                                if up.startswith('#ARTIST'):
-                                    parts = s.split(':', 1)
-                                    artist = parts[1].strip() if len(parts) > 1 else s[len('#ARTIST'):].strip()
-                                elif up.startswith('#TITLE'):
-                                    parts = s.split(':', 1)
-                                    title = parts[1].strip() if len(parts) > 1 else s[len('#TITLE'):].strip()
-                                if artist and title:
-                                    break
-                    except Exception:
-                        logger.exception('Failed to read txt file for id %s: %s', id_param, candidate_txt)
-                    if artist or title:
-                        # build line with available parts
-                        if artist and title:
-                            line = f"{artist} : {title}"
-                        elif artist:
-                            line = artist
-                        else:
-                            line = title
-        except Exception:
-            logger.exception('Error deriving artist/title for id %s', id_param)
-
+        line = derive_playlist_label(entry)
         if not line:
-            line = entry.get('display') or os.path.splitext(os.path.basename(entry.get('txt','')))[0].replace('_',' ')
-        upl_path = os.path.realpath(os.path.join(os.path.dirname(__file__), args.usdx_dir, 'playlists', args.playlist_name))
+            fallback = entry.get('display') or os.path.splitext(os.path.basename(entry.get('txt', '')))[0].replace('_', ' ')
+            line = normalize_playlist_label(fallback or '')
+        if not line:
+            return jsonify({'success': False, 'error': 'Unable to derive playlist label'}), 500
 
-        # Ensure upl file exists
-        try:
-            if not os.path.exists(upl_path):
-                open(upl_path, 'a', encoding='utf-8').close()
-        except Exception:
-            logger.exception('Failed to ensure upl file exists: %s', upl_path)
-
-        if action == 'add':
-            # append only if not already present
-            existing = []
-            try:
-                with open(upl_path, 'r', encoding='utf-8') as fh:
-                    existing = [l.strip() for l in fh if l.strip()]
-            except Exception:
-                existing = []
-            if line not in existing:
-                try:
-                    with open(upl_path, 'a', encoding='utf-8') as fh:
-                        fh.write(line + '\n')
-                except Exception as e:
-                    logger.exception('Failed to append to upl %s', upl_path)
-                    return jsonify({'success': False, 'error': str(e)}), 500
-            entry['upl'] = True
-
-        elif action == 'remove':
-            # remove matching lines from upl file
-            try:
-                if os.path.exists(upl_path):
-                    with open(upl_path, 'r', encoding='utf-8') as fh:
-                        lines = [l.rstrip('\n') for l in fh]
-                    newlines = [l for l in lines if l.strip() != line]
-                    with open(upl_path, 'w', encoding='utf-8') as fh:
-                        for l in newlines:
-                            fh.write(l + '\n')
-            except Exception as e:
-                logger.exception('Failed to remove from upl %s', upl_path)
-                return jsonify({'success': False, 'error': str(e)}), 500
-            entry['upl'] = False
-
-        else:
-            return jsonify({'success': False, 'error': 'Unknown action'}), 400
+        updated_lines = []
+        with PLAYLIST_FILE_LOCK:
+            lines = _read_playlist_lines_unlocked()
+            os.makedirs(os.path.dirname(playlist_file_path()), exist_ok=True)
+            if action == 'add':
+                if line not in lines:
+                    lines.append(line)
+                    _write_playlist_lines_unlocked(lines)
+                entry['upl'] = True
+                updated_lines = list(lines)
+            elif action == 'remove':
+                newlines = [l for l in lines if l.strip() != line]
+                if len(newlines) != len(lines):
+                    _write_playlist_lines_unlocked(newlines)
+                entry['upl'] = False
+                updated_lines = list(newlines)
+            else:
+                return jsonify({'success': False, 'error': 'Unknown action'}), 400
 
         # persist updated index to disk
         try:
@@ -1139,6 +2199,12 @@ def songs_add_to_upl():
 
         # update in-memory map
         SONGS_BY_ID[str(entry.get('id'))] = entry
+        try:
+            _register_song_entry(entry)
+        except Exception:
+            logger.exception('Failed to refresh song audio mapping for entry %s', entry.get('id'))
+
+        refresh_playlist_state_cache(updated_lines)
 
         return jsonify({'success': True, 'id': entry.get('id'), 'upl': entry.get('upl', False), 'line': line})
 
@@ -1206,6 +2272,66 @@ def songs_preview():
         logger.exception('Error handling preview request: %s', e)
         return jsonify({'success': False, 'error': 'Server error', 'detail': str(e)}), 500
 
+
+@app.route('/playlist/status', methods=['GET'])
+def playlist_status():
+    try:
+        payload = playlist_status_payload()
+        return jsonify({'success': True, **payload})
+    except Exception as exc:
+        logger.exception('Failed to fetch playlist status: %s', exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/playlist/toggle', methods=['POST'])
+def playlist_toggle():
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get('enabled'))
+    countdown = data.get('countdown_seconds')
+    logger.info(f'playlist_toggle called: enabled={enabled}, countdown={countdown}, data={data}')
+
+    if enabled:
+        guard = require_control_lock()
+        if guard is not None:
+            logger.info('playlist_toggle: control lock required and not held')
+            return guard
+    else:
+        guard = enforce_control_password()
+        if guard is not None:
+            logger.info('playlist_toggle: control password required and not valid')
+            return guard
+        sid = session.get('session_id')
+        if CONTROL_OWNER and CONTROL_OWNER != sid:
+            logger.warning('Playlist disable requested by session %s without control lock (owner=%s)', sid, CONTROL_OWNER)
+
+    try:
+        logger.info(f'Calling set_playlist_enabled(enabled={enabled}, countdown={countdown})')
+        state = set_playlist_enabled(enabled, countdown)
+        logger.info(f'set_playlist_enabled returned: {state}')
+        if enabled:
+            logger.info('Attempting to trigger playlist sequence immediately...')
+            ok, err = trigger_playlist_sequence_immediately(countdown)
+            logger.info(f'trigger_playlist_sequence_immediately returned: ok={ok}, err={err}')
+            if not ok:
+                logger.warning('Failed to trigger playlist sequence after enabling: %s', err)
+            state = playlist_status_payload()
+        return jsonify({'success': True, 'state': state})
+    except Exception as exc:
+        logger.exception('Failed to toggle playlist mode: %s', exc)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/playlist/next', methods=['POST'])
+def playlist_next():
+    guard = require_control_lock()
+    if guard is not None:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    custom_seconds = data.get('countdown_seconds')
+    ok, token_or_error = request_playlist_countdown(custom_seconds)
+    if not ok:
+        return jsonify({'success': False, 'error': token_or_error}), 400
+    return jsonify({'success': True, 'countdown_token': token_or_error, 'state': playlist_status_payload()})
 
 
 def signal_handler(signum, frame):
@@ -1457,6 +2583,8 @@ if __name__ == '__main__':
     usdx_group.add_argument('--run-usdx', action='store_true', help='Run UltraStar Deluxe after server startup')
     usdx_group.add_argument('--audio-format', type=str, default='m4a', help='Audio format of songs in UltraStar Deluxe (default: m4a)')
     usdx_group.add_argument('--set-inputs', action='store_true', help='Initialize [Record] section in config.ini for 6 virtual sinks')
+    usdx_group.add_argument('--usdx-log-file', type=str, default=None, help='Path to the UltraStar Deluxe log file for playlist resync automation')
+    usdx_group.add_argument('--countdown', type=int, default=15, help='Default countdown seconds before every step in playlist mode (default: 15)')
 
     # Server Options
     server_group = parser.add_argument_group('Server Options')
@@ -1475,6 +2603,13 @@ if __name__ == '__main__':
     except Exception:
         MAX_NAME_LENGTH = 16
 
+    try:
+        PLAYLIST_COUNTDOWN_DEFAULT = max(1, int(getattr(args, 'countdown', PLAYLIST_COUNTDOWN_DEFAULT)))
+    except Exception:
+        PLAYLIST_COUNTDOWN_DEFAULT = 15
+    with PLAYLIST_STATE_LOCK:
+        PLAYLIST_STATE['countdown_seconds'] = PLAYLIST_COUNTDOWN_DEFAULT
+
     signal.signal(signal.SIGINT, signal_handler)
 
     # Truncate the logfile on startup so each run starts fresh
@@ -1488,6 +2623,8 @@ if __name__ == '__main__':
         pass
 
     logging.basicConfig(filename=logfile_path, level=logging.INFO if not args.debug else logging.DEBUG)
+
+    _initialize_usdx_log_monitor(args.usdx_log_file)
 
     # Run iptables forwarding only when explicitly requested
     if args.enable_forwarding:
@@ -1503,7 +2640,10 @@ if __name__ == '__main__':
         handle_start_hotspot(args.start_hotspot)
 
     if args.set_inputs:
-        initialize_record_section()
+        if CONTROL_ONLY_MODE:
+            logger.info('Skipping --set-inputs because server is running in control-only mode')
+        else:
+            initialize_record_section()
 
     if args.domain != 'localhost':
         setup_domain_hotspot_mapping(args.domain)
@@ -1607,6 +2747,11 @@ if __name__ == '__main__':
         print(f'Initialized playlist {upl_path}')
     except Exception:
         logger.exception('Failed to create/truncate playlist file')
+
+    try:
+        start_playlist_thread()
+    except Exception:
+        logger.exception('Failed to start playlist automation thread')
 
     # Set the port from command line argument
     port = args.port
