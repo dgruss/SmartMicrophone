@@ -399,15 +399,6 @@ const MICROPHONE_COLORS = [
 const MIC_ROOM_KEYS = ['mic1', 'mic2', 'mic3', 'mic4', 'mic5', 'mic6'];
 const DEFAULT_ROOM_CAP_LIMIT = 6;
 
-const LOCK_SCREEN_VIDEOS = {
-    mic1: '/static/P1.mp4',
-    mic2: '/static/P2.mp4',
-    mic3: '/static/P3.mp4',
-    mic4: '/static/P4.mp4',
-    mic5: '/static/P5.mp4',
-    mic6: '/static/P6.mp4'
-};
-
 let lockVideoEl = null;
 let lockLabelEl = null;
 
@@ -448,21 +439,55 @@ function hideLockScreenVideo() {
     }
 }
 
-function updateLockScreenVideo(roomName) {
+// Enhanced: allow dynamic video selection for mic level bar (3-level, 5s min interval, max peak, user setting)
+let _lastMicLevelVideoKey = null;
+let _lastMicLevelVideoTime = 0;
+let _maxMicPeak = 0;
+function updateLockScreenVideo(roomName, opts = {}) {
     ensureLockScreenElements();
     if (!lockVideoEl) return;
-    const key = (roomName || '').toLowerCase();
-    const clip = LOCK_SCREEN_VIDEOS[key];
-    if (!clip) {
-        hideLockScreenVideo();
-        return;
+    // Determine if mic bar is enabled
+    let micBarEnabled = true;
+    try {
+        micBarEnabled = localStorage.getItem('optLockScreenMicBar') !== 'false';
+    } catch (e) {}
+    // If opts.micLevel is set, use it to pick video (simulate mic bar)
+    let key = (roomName || '').toLowerCase();
+    let variant = 3; // default: always show -3 if disabled
+    if (opts.micLevel != null && micBarEnabled) {
+        // Track max peak so far (reset on reload)
+        _maxMicPeak = Math.max(_maxMicPeak, opts.micLevel);
+        // Use max peak for scaling
+        let scaled = _maxMicPeak > 0 ? opts.micLevel / _maxMicPeak : 0;
+        // 3 levels: 1 (low), 2 (med), 3 (high)
+        if (scaled < 0.33) variant = 1;
+        else if (scaled < 0.66) variant = 2;
+        else variant = 3;
     }
-    if (!lockVideoEl.dataset || lockVideoEl.dataset.currentVideo !== clip) {
+    // Always use -3 if disabled
+    if (!micBarEnabled) {
+        variant = 3;
+    }
+    // Always use the correct P1–P6 prefix for the current room/player
+    // If roomName is not provided, fallback to currentRoom
+    let roomKey = key;
+    if (!roomKey) {
+        try {
+            roomKey = (typeof currentRoom === 'string' ? currentRoom : 'mic1');
+        } catch (e) { roomKey = 'mic1'; }
+    }
+    let prefix = roomKey.replace('mic', 'P');
+    let videoFile = `/static/${prefix}-${variant}.mp4`;
+    // Only update if video changed and at least 5s since last change
+    const now = Date.now();
+    if (_lastMicLevelVideoKey !== videoFile && (now - _lastMicLevelVideoTime > 5000 || _lastMicLevelVideoKey === null)) {
         if (lockVideoEl.dataset) {
-            lockVideoEl.dataset.currentVideo = clip;
+            lockVideoEl.dataset.currentVideo = videoFile;
         }
-        lockVideoEl.src = clip;
+        lockVideoEl.src = videoFile;
         try { lockVideoEl.load(); } catch (e) {}
+        _lastMicLevelVideoKey = videoFile;
+        _lastMicLevelVideoTime = now;
     }
     lockVideoEl.style.display = 'block';
     if (lockLabelEl) {
@@ -614,6 +639,8 @@ function startMicLevelLoop() {
     if (!micHealth.dataArray || micHealth.dataArray.length !== micHealth.analyser.fftSize) {
         micHealth.dataArray = new Uint8Array(micHealth.analyser.fftSize);
     }
+    // Reset max peak on reload
+    _maxMicPeak = 0;
     const step = () => {
         micHealth.analyser.getByteTimeDomainData(micHealth.dataArray);
         let sum = 0;
@@ -629,6 +656,10 @@ function startMicLevelLoop() {
         }
         if (micHealth.ui.levelValue) {
             micHealth.ui.levelValue.textContent = `${Math.round(level * 100)}%`;
+        }
+        // If lock screen video is visible, update video to match mic level (with 5s min interval, 3-level, max peak, user setting)
+        if (lockVideoEl && lockVideoEl.style.display !== 'none') {
+            updateLockScreenVideo(null, {micLevel: level});
         }
         const now = performance.now();
         const silenceThreshold = 0.02;
@@ -1102,6 +1133,10 @@ document.addEventListener('DOMContentLoaded', function() {
         if (audioOptions) audioOptions.style.display = 'none';
     } else {
         try {
+            // AGC default: true for new users
+            if (localStorage.getItem('optAutoGain') === null) {
+                localStorage.setItem('optAutoGain', 'true');
+            }
             const ns = localStorage.getItem('optNoiseSuppression') === 'true';
             const ec = localStorage.getItem('optEchoCancellation') === 'true';
             const ag = localStorage.getItem('optAutoGain') === 'true';
@@ -1111,6 +1146,19 @@ document.addEventListener('DOMContentLoaded', function() {
             if (nsEl) { nsEl.checked = ns; nsEl.addEventListener('change', () => { localStorage.setItem('optNoiseSuppression', nsEl.checked); }); }
             if (ecEl) { ecEl.checked = ec; ecEl.addEventListener('change', () => { localStorage.setItem('optEchoCancellation', ecEl.checked); }); }
             if (agEl) { agEl.checked = ag; agEl.addEventListener('change', () => { localStorage.setItem('optAutoGain', agEl.checked); }); }
+
+            // Lock screen mic bar default: true for new users
+            if (localStorage.getItem('optLockScreenMicBar') === null) {
+                localStorage.setItem('optLockScreenMicBar', 'true');
+            }
+            const micBar = localStorage.getItem('optLockScreenMicBar') === 'true';
+            const micBarEl = document.getElementById('optLockScreenMicBar');
+            if (micBarEl) {
+                micBarEl.checked = micBar;
+                micBarEl.addEventListener('change', () => {
+                    localStorage.setItem('optLockScreenMicBar', micBarEl.checked);
+                });
+            }
         } catch (e) { }
     }
     // Initialize delay control

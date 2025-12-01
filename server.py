@@ -910,9 +910,6 @@ def _begin_initial_playlist_sequence(duration):
 
 
 def _select_next_song_with_countdown(duration):
-    ok, info = _prepare_pending_playlist_entry()
-    if not ok:
-        return False, info
     ok, error = _send_playlist_select_next_song_sequence()
     if not ok:
         return False, error
@@ -1035,6 +1032,10 @@ def _on_scores_countdown_expired(expected_token):
             logger.debug('Ignoring stale scores countdown token %s (current %s)', expected_token, current_token)
             return
         PLAYLIST_STATE['countdown_deadline'] = None
+    ok, info = _prepare_pending_playlist_entry()
+    if not ok:
+        _set_playlist_error(info or 'Failed to prepare next playlist entry')
+        return
     ok, error = _send_playlist_confirm_scores_sequence()
     if not ok:
         _set_playlist_error(error or 'Failed to confirm scores')
