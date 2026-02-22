@@ -401,6 +401,8 @@ const DEFAULT_ROOM_CAP_LIMIT = 6;
 
 let lockVideoEl = null;
 let lockLabelEl = null;
+let lockVolumeOverlayEl = null;
+let lockVolumeFillEl = null;
 
 function ensureLockScreenElements() {
     if (!lockVideoEl || !lockVideoEl.isConnected) {
@@ -408,6 +410,12 @@ function ensureLockScreenElements() {
     }
     if (!lockLabelEl || !lockLabelEl.isConnected) {
         lockLabelEl = document.getElementById('lockLabel');
+    }
+    if (!lockVolumeOverlayEl || !lockVolumeOverlayEl.isConnected) {
+        lockVolumeOverlayEl = document.getElementById('lockVolumeOverlay');
+    }
+    if (!lockVolumeFillEl || !lockVolumeFillEl.isConnected) {
+        lockVolumeFillEl = document.getElementById('lockVolumeFill');
     }
 }
 
@@ -437,6 +445,9 @@ function hideLockScreenVideo() {
     if (lockLabelEl) {
         lockLabelEl.style.display = 'none';
     }
+    if (lockVolumeOverlayEl) {
+        lockVolumeOverlayEl.style.display = 'none';
+    }
 }
 
 // Enhanced: allow dynamic video selection for mic level bar (3-level, 5s min interval, max peak, user setting)
@@ -448,13 +459,15 @@ function updateLockScreenVideo(roomName, opts = {}) {
     if (!lockVideoEl) return;
     // Determine if mic bar is enabled
     let micBarEnabled = true;
+    let overlayEnabled = true;
     try {
         micBarEnabled = localStorage.getItem('optLockScreenMicBar') !== 'false';
+        overlayEnabled = localStorage.getItem('optLockScreenOverlay') !== 'false';
     } catch (e) {}
     // If opts.micLevel is set, use it to pick video (simulate mic bar)
     let key = (roomName || '').toLowerCase();
     let variant = 3; // default: always show -3 if disabled
-    if (opts.micLevel != null && micBarEnabled) {
+    if (opts.micLevel != null && micBarEnabled && !overlayEnabled) {
         // Track max peak so far (reset on reload)
         _maxMicPeak = Math.max(_maxMicPeak, opts.micLevel);
         // Use max peak for scaling
@@ -488,6 +501,17 @@ function updateLockScreenVideo(roomName, opts = {}) {
         try { lockVideoEl.load(); } catch (e) {}
         _lastMicLevelVideoKey = videoFile;
         _lastMicLevelVideoTime = now;
+    }
+    if (lockVolumeOverlayEl) {
+        if (micBarEnabled && overlayEnabled) {
+            lockVolumeOverlayEl.style.display = 'block';
+        } else {
+            lockVolumeOverlayEl.style.display = 'none';
+        }
+    }
+    if (lockVolumeFillEl && overlayEnabled && micBarEnabled) {
+        const level = opts.micLevel != null ? Math.max(0, Math.min(1, opts.micLevel)) : 0;
+        lockVolumeFillEl.style.width = `${Math.round(level * 100)}%`;
     }
     lockVideoEl.style.display = 'block';
     if (lockLabelEl) {
@@ -1306,6 +1330,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 micBarEl.checked = micBar;
                 micBarEl.addEventListener('change', () => {
                     localStorage.setItem('optLockScreenMicBar', micBarEl.checked);
+                });
+            }
+
+            if (localStorage.getItem('optLockScreenOverlay') === null) {
+                localStorage.setItem('optLockScreenOverlay', 'true');
+            }
+            const overlayEl = document.getElementById('optLockScreenOverlay');
+            if (overlayEl) {
+                overlayEl.checked = localStorage.getItem('optLockScreenOverlay') !== 'false';
+                overlayEl.addEventListener('change', () => {
+                    localStorage.setItem('optLockScreenOverlay', overlayEl.checked ? 'true' : 'false');
                 });
             }
 
