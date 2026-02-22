@@ -1313,7 +1313,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             if (localStorage.getItem('optConnectionNotifications') === null) {
-                localStorage.setItem('optConnectionNotifications', 'false');
+                localStorage.setItem('optConnectionNotifications', 'true');
             }
             const notifyEl = document.getElementById('optConnectionNotifications');
             if (notifyEl) {
@@ -1327,7 +1327,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             if (localStorage.getItem('optWakeLock') === null) {
-                localStorage.setItem('optWakeLock', 'false');
+                localStorage.setItem('optWakeLock', 'true');
             }
             const wakeEl = document.getElementById('optWakeLock');
             if (wakeEl) {
