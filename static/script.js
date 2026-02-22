@@ -552,6 +552,8 @@ let lastStatusRttMs = null;
 let lastServerAudioSeenMs = null;
 let lastMetricsSentAt = 0;
 let serverAudioWarningAt = 0;
+let lastPingWarningAt = 0;
+const PING_ALERT_THRESHOLD_MS = 200;
 
 function getSilenceInterventionMs() {
     let seconds = 5;
@@ -1572,6 +1574,14 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = await res.json();
             lastStatusRttMs = Math.round(performance.now() - startedAt);
             if (data && data.success) {
+                const reportedLatency = data.you && Number.isFinite(data.you.latency_ms) ? data.you.latency_ms : null;
+                const maxPing = Math.max(lastStatusRttMs || 0, reportedLatency || 0);
+                const nowMs = Date.now();
+                if (maxPing >= PING_ALERT_THRESHOLD_MS && nowMs - lastPingWarningAt > 10000) {
+                    lastPingWarningAt = nowMs;
+                    setMicStatusMessage(`High latency detected (${maxPing} ms).`, {severity: 'warn'});
+                    sendConnectionNotification(`High latency detected (${maxPing} ms).`);
+                }
                 if (data.rooms) {
                     rooms = data.rooms;
                     updateRoomDisplays();
