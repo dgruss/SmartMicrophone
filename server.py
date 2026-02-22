@@ -1350,7 +1350,7 @@ def log_incoming_request():
         sid = session.get('session_id')
         if sid:
             LAST_SEEN[sid] = time.time()
-        if not request.path in ['/rooms', '/status', '/control/status']:
+        if not request.path in ['/rooms', '/status', '/control/status', '/playlist/status'] and not request.path.startswith('/static/'):
             logger.info('Incoming request: %s %s args=%s', request.method, request.path, dict(request.args))
     except Exception:
         pass
@@ -2550,7 +2550,7 @@ def setup_domain_hotspot_mapping(domain):
             logger.info(f"IP address: {ip}")
             logger.info("----")
             # Prepare new config content
-            new_content = f"address=/{domain}/{ip}\nlocal-ttl=86400\n"
+            new_content = f"address=/{domain}/{ip}"#\nlocal-ttl=86400\n"
             # Read current config if exists
             current_content = None
             if os.path.exists(CONF_PATH):

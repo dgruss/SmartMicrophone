@@ -395,7 +395,7 @@ class WebRTCMicrophoneManager:
             self.unload_all_null_sink_modules()
         except Exception:
             logger.exception('Failed to unload existing null-sink modules at startup')
-        self.sink_count = 7  # 0 = lobby/null, 1-6 = game mics
+        self.sink_count = 8  # 0 = lobby/null, 1-6 = game mics
         self.sink_names = [f'smartphone-mic-{i}-sink' for i in range(self.sink_count)]
         self.sinks_ready = False
         self.microphones = {}  # player_id -> WebRTCMicrophone instance
