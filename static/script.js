@@ -439,6 +439,17 @@ function hideLockScreenVideo() {
     }
 }
 
+async function leaveFullscreenAndLockScreen(reason = '') {
+    try { hideLockScreenVideo(); } catch (e) {}
+    try {
+        if (document.fullscreenElement && document.exitFullscreen) {
+            await document.exitFullscreen();
+        }
+    } catch (e) {
+        // ignore fullscreen exit failures
+    }
+}
+
 // Enhanced: allow dynamic video selection for mic level bar (3-level, 5s min interval, max peak, user setting)
 let _lastMicLevelVideoKey = null;
 let _lastMicLevelVideoTime = 0;
@@ -688,6 +699,7 @@ function setMicStatusMessage(text, options = {}) {
 }
 
 function showMicReloadPrompt(reason, options = {}) {
+    try { leaveFullscreenAndLockScreen('mic-reload-prompt'); } catch (e) {}
     if (options.sticky) {
         micHealth.reloadPromptShown = true;
     }
@@ -1579,6 +1591,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const nowMs = Date.now();
                 if (maxPing >= PING_ALERT_THRESHOLD_MS && nowMs - lastPingWarningAt > 10000) {
                     lastPingWarningAt = nowMs;
+                    try { leaveFullscreenAndLockScreen('high-latency-warning'); } catch (e) {}
                     setMicStatusMessage(`High latency detected (${maxPing} ms).`, {severity: 'warn'});
                     sendConnectionNotification(`High latency detected (${maxPing} ms).`);
                 }
@@ -1615,6 +1628,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             if (nowMs - serverAudioWarningAt > 15000) {
                                 serverAudioWarningAt = nowMs;
                                 if (localRecentlyActive) {
+                                    try { leaveFullscreenAndLockScreen('connection-unstable-warning'); } catch (e) {}
                                     setMicStatusMessage('Connection unstable — reconnecting…', {severity: 'warn'});
                                     try { window.triggerConnectionIntervention && window.triggerConnectionIntervention('server_audio'); } catch (e) {}
                                     sendConnectionNotification('Connection unstable — reconnecting to your room.');

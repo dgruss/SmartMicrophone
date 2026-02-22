@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+  #!/usr/bin/env python3
 
 from flask import Flask, render_template, request, jsonify, session, send_file, send_from_directory
 from flask import Response, stream_with_context
@@ -2509,7 +2509,7 @@ def initialize_record_section():
     for k in keys_to_remove:
         cp.remove_option('Record', k)
     # Add 6 virtual sinks
-    for i in range(1, 6):
+    for i in range(1, 7):
         cp['Record'][f'DeviceName[{i}]'] = f'smartphone-mic-{i}-sink Audio/Source/Virtual sink'
         cp['Record'][f'Input[{i}]'] = '0'
         cp['Record'][f'Latency[{i}]'] = '-1'
@@ -2655,25 +2655,42 @@ def handle_start_hotspot(hotspot_name):
     if not hotspot_name:
         return
     waiting = 0
+    already_active = False
     while waiting < 30:
-        status = subprocess.run(["nmcli", "c", "show", hotspot_name], capture_output=True, text=True)
+        status = subprocess.run(["nmcli", "-t", "-f", "GENERAL.STATE,IP4.ADDRESS", "c", "show", hotspot_name], capture_output=True, text=True)
         if status.returncode == 0:
+            state = None
+            ip = None
             for line in status.stdout.splitlines():
-                if line.strip().startswith("IP4.ADDRESS"):
-                    ip = line.split(":", 1)[1].strip()
-                    if ip and ip != '--':
-                        print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
-                        return
+                if line.startswith("GENERAL.STATE"):
+                    try:
+                        state = line.split(":", 1)[1].strip()
+                    except Exception:
+                        state = None
+                if line.startswith("IP4.ADDRESS"):
+                    try:
+                        ip = line.split(":", 1)[1].strip()
+                    except Exception:
+                        ip = None
+            if state and state.startswith("activated"):
+                already_active = True
+                if ip and ip != '--':
+                    print(f"Hotspot '{hotspot_name}' is up with IP {ip}.")
+                    return
         if waiting == 0:
-          logger.info(f"Bringing up hotspot '{hotspot_name}' with nmcli...")
-          result = subprocess.run(["nmcli", "c", "up", hotspot_name], capture_output=True, text=True)
-          waiting = 1
-          if result.returncode != 0:
-              logger.error(f"Failed to start hotspot '{hotspot_name}': {result.stderr}")
-              sys.exit(1)
+          if already_active:
+              logger.info(f"Hotspot '{hotspot_name}' already active; skipping restart.")
+              waiting = 1
+          else:
+              logger.info(f"Bringing up hotspot '{hotspot_name}' with nmcli...")
+              result = subprocess.run(["nmcli", "c", "up", hotspot_name], capture_output=True, text=True)
+              waiting = 1
+              if result.returncode != 0:
+                  logger.error(f"Failed to start hotspot '{hotspot_name}': {result.stderr}")
+                  sys.exit(1)
         else:
             logger.info(f"Waiting for an IP address...")
-            waiting += 1
+            waiting += 1                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
             time.sleep(1)
     logger.error(f"Timeout waiting for hotspot '{hotspot_name}' to have an IP address.")
     sys.exit(1)
