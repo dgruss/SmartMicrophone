@@ -156,26 +156,6 @@
       box-shadow: 0 4px 10px rgba(0,0,0,0.6);
       touch-action: none;
     }
-    #lockVolumeOverlay {
-      position: fixed;
-      bottom: 22px;
-      left: 24px;
-      width: calc(100vw - 48px);
-      height: 6px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.25);
-      z-index: 100001;
-      display: none;
-      pointer-events: none;
-      overflow: hidden;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-    }
-    #lockVolumeFill {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, rgba(34,197,94,0.95), rgba(250,204,21,0.95), rgba(249,115,22,0.95));
-      transition: width 120ms ease-out;
-    }
   </style>
   <script>
     var microphoneIndex = {{ session.get('microphone_index', 'undefined') }};
@@ -230,7 +210,6 @@
         <label><input type="checkbox" id="optEchoCancellation"> Enable echo cancellation</label>
         <label><input type="checkbox" id="optAutoGain"> Enable auto gain control (AGC)</label>
         <label><input type="checkbox" id="optLockScreenMicBar"> Show mic level on lock screen</label>
-        <label><input type="checkbox" id="optLockScreenOverlay"> Smooth lock screen volume overlay</label>
       </div>
     </div>
     <div id="stabilityOptionsSection" style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
@@ -449,7 +428,6 @@
   </video>
     <!-- Overlay label shown on top of the bottom video; pointer-events:none lets clicks reach the video controls -->
     <div id="lockLabel" style="display:none; position: fixed; bottom: 12px; left: 12px; width: calc(100vw - 24px); height: 64px; z-index: 100000; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:18px; text-shadow:0 2px 6px rgba(0,0,0,0.6); pointer-events:none;">Lock Screen</div>
-    <div id="lockVolumeOverlay"><div id="lockVolumeFill"></div></div>
   <div id="lockOverlay" role="dialog" aria-hidden="true">
     <div id="lockInner">
       <div id="lockHint">Screen locked — drag the handle to unlock</div>

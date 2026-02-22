@@ -401,8 +401,6 @@ const DEFAULT_ROOM_CAP_LIMIT = 6;
 
 let lockVideoEl = null;
 let lockLabelEl = null;
-let lockVolumeOverlayEl = null;
-let lockVolumeFillEl = null;
 
 function ensureLockScreenElements() {
     if (!lockVideoEl || !lockVideoEl.isConnected) {
@@ -410,12 +408,6 @@ function ensureLockScreenElements() {
     }
     if (!lockLabelEl || !lockLabelEl.isConnected) {
         lockLabelEl = document.getElementById('lockLabel');
-    }
-    if (!lockVolumeOverlayEl || !lockVolumeOverlayEl.isConnected) {
-        lockVolumeOverlayEl = document.getElementById('lockVolumeOverlay');
-    }
-    if (!lockVolumeFillEl || !lockVolumeFillEl.isConnected) {
-        lockVolumeFillEl = document.getElementById('lockVolumeFill');
     }
 }
 
@@ -445,9 +437,6 @@ function hideLockScreenVideo() {
     if (lockLabelEl) {
         lockLabelEl.style.display = 'none';
     }
-    if (lockVolumeOverlayEl) {
-        lockVolumeOverlayEl.style.display = 'none';
-    }
 }
 
 // Enhanced: allow dynamic video selection for mic level bar (3-level, 5s min interval, max peak, user setting)
@@ -459,15 +448,13 @@ function updateLockScreenVideo(roomName, opts = {}) {
     if (!lockVideoEl) return;
     // Determine if mic bar is enabled
     let micBarEnabled = true;
-    let overlayEnabled = true;
     try {
         micBarEnabled = localStorage.getItem('optLockScreenMicBar') !== 'false';
-        overlayEnabled = localStorage.getItem('optLockScreenOverlay') !== 'false';
     } catch (e) {}
     // If opts.micLevel is set, use it to pick video (simulate mic bar)
     let key = (roomName || '').toLowerCase();
     let variant = 3; // default: always show -3 if disabled
-    if (opts.micLevel != null && micBarEnabled && !overlayEnabled) {
+    if (opts.micLevel != null && micBarEnabled) {
         // Track max peak so far (reset on reload)
         _maxMicPeak = Math.max(_maxMicPeak, opts.micLevel);
         // Use max peak for scaling
@@ -501,17 +488,6 @@ function updateLockScreenVideo(roomName, opts = {}) {
         try { lockVideoEl.load(); } catch (e) {}
         _lastMicLevelVideoKey = videoFile;
         _lastMicLevelVideoTime = now;
-    }
-    if (lockVolumeOverlayEl) {
-        if (micBarEnabled && overlayEnabled) {
-            lockVolumeOverlayEl.style.display = 'block';
-        } else {
-            lockVolumeOverlayEl.style.display = 'none';
-        }
-    }
-    if (lockVolumeFillEl && overlayEnabled && micBarEnabled) {
-        const level = opts.micLevel != null ? Math.max(0, Math.min(1, opts.micLevel)) : 0;
-        lockVolumeFillEl.style.width = `${Math.round(level * 100)}%`;
     }
     lockVideoEl.style.display = 'block';
     if (lockLabelEl) {
@@ -676,7 +652,8 @@ const micHealth = {
     reloadPromptShown: false,
     lastInterventionAt: 0,
     interventionInFlight: false,
-    lastLevel: 0
+    lastLevel: 0,
+    lastLocalAudioAt: null
 };
 
 function initMicHealthUI() {
@@ -764,9 +741,9 @@ function startMicLevelLoop() {
             const v = (micHealth.dataArray[i] - 128) / 128;
             sum += v * v;
         }
-    const rms = Math.sqrt(sum / micHealth.dataArray.length);
+            const rms = Math.sqrt(sum / micHealth.dataArray.length);
         const level = Math.min(1, rms * 2);
-    micHealth.lastLevel = level;
+        micHealth.lastLevel = level;
         if (micHealth.ui.levelFill) {
             micHealth.ui.levelFill.style.transform = `scaleX(${level})`;
             micHealth.ui.levelFill.style.background = level > 0.6 ? '#22c55e' : (level > 0.3 ? '#facc15' : '#f97316');
@@ -780,6 +757,10 @@ function startMicLevelLoop() {
         }
         const now = performance.now();
         const silenceThreshold = 0.02;
+        const localActiveThreshold = 0.01;
+        if (level >= localActiveThreshold) {
+            micHealth.lastLocalAudioAt = now;
+        }
         if (level < silenceThreshold) {
             if (!micHealth.silenceStart) {
                 micHealth.silenceStart = now;
@@ -791,9 +772,7 @@ function startMicLevelLoop() {
                     if (now - micHealth.lastInterventionAt > cooldown) {
                         micHealth.lastInterventionAt = now;
                         micHealth.interventionInFlight = true;
-                        setMicStatusMessage('Connection unstable — reconnecting…', {severity: 'warn'});
-                        try { window.triggerConnectionIntervention && window.triggerConnectionIntervention('silence'); } catch (e) {}
-                        sendConnectionNotification('Connection unstable — reconnecting to your room.');
+                        setMicStatusMessage('Microphone is quiet. If you are speaking, check mic access.', {severity: 'warn'});
                         setTimeout(() => { micHealth.interventionInFlight = false; }, 4000);
                     }
                 }
@@ -946,7 +925,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const latency = latencyByName && Object.prototype.hasOwnProperty.call(latencyByName, name)
             ? latencyByName[name]
             : null;
-        const latencyLabel = Number.isFinite(latency) ? `<span style="font-size:0.8em; color:#64748b;"> (${latency} ms)</span>` : '';
+        const latencyLabel = Number.isFinite(latency) ? `<span style="font-size:0.6em; color:#888888;"> ${latency}ms</span>` : '';
         return isSelf ? `<strong>${safeName}</strong>${latencyLabel}` : `${safeName}${latencyLabel}`;
     }
 
@@ -1333,17 +1312,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             }
 
-            if (localStorage.getItem('optLockScreenOverlay') === null) {
-                localStorage.setItem('optLockScreenOverlay', 'true');
-            }
-            const overlayEl = document.getElementById('optLockScreenOverlay');
-            if (overlayEl) {
-                overlayEl.checked = localStorage.getItem('optLockScreenOverlay') !== 'false';
-                overlayEl.addEventListener('change', () => {
-                    localStorage.setItem('optLockScreenOverlay', overlayEl.checked ? 'true' : 'false');
-                });
-            }
-
             if (localStorage.getItem('optConnectionNotifications') === null) {
                 localStorage.setItem('optConnectionNotifications', 'false');
             }
@@ -1631,12 +1599,18 @@ document.addEventListener('DOMContentLoaded', function() {
                         lastServerAudioSeenMs = data.you.audio_last_seen * 1000;
                         const nowMs = Date.now();
                         const serverStaleMs = Math.max(4000, getSilenceInterventionMs());
+                        const localActiveWindow = Math.max(2000, getSilenceInterventionMs());
+                        const localRecentlyActive = micHealth.lastLocalAudioAt && (performance.now() - micHealth.lastLocalAudioAt < localActiveWindow);
                         if (micHealth.stream && nowMs - lastServerAudioSeenMs > serverStaleMs) {
                             if (nowMs - serverAudioWarningAt > 15000) {
                                 serverAudioWarningAt = nowMs;
-                                setMicStatusMessage('Server not receiving audio — reconnecting…', {severity: 'warn'});
-                                try { window.triggerConnectionIntervention && window.triggerConnectionIntervention('server_audio'); } catch (e) {}
-                                sendConnectionNotification('Server not receiving audio — reconnecting to your room.');
+                                if (localRecentlyActive) {
+                                    setMicStatusMessage('Connection unstable — reconnecting…', {severity: 'warn'});
+                                    try { window.triggerConnectionIntervention && window.triggerConnectionIntervention('server_audio'); } catch (e) {}
+                                    sendConnectionNotification('Connection unstable — reconnecting to your room.');
+                                } else {
+                                    setMicStatusMessage('Microphone appears silent. If this is unexpected, check mic access.', {severity: 'warn'});
+                                }
                             }
                         }
                     }
