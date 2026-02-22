@@ -925,7 +925,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const latency = latencyByName && Object.prototype.hasOwnProperty.call(latencyByName, name)
             ? latencyByName[name]
             : null;
-        const latencyLabel = Number.isFinite(latency) ? `<span style="font-size:0.6em; color:#888888;"> ${latency}ms</span>` : '';
+        const latencyLabel = Number.isFinite(latency) ? `<span style="font-size:0.4em"> ${latency}ms</span>` : '';
         return isSelf ? `<strong>${safeName}</strong>${latencyLabel}` : `${safeName}${latencyLabel}`;
     }
 
