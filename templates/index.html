@@ -212,6 +212,18 @@
         <label><input type="checkbox" id="optLockScreenMicBar"> Show mic level on lock screen</label>
       </div>
     </div>
+    <div id="stabilityOptionsSection" style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
+      <h3>Connection stability</h3>
+      <p style="font-size:0.9em; color:#555; margin-top:8px;">Tune how aggressively the client reacts to silence and whether it can show local notifications.</p>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <label><input type="checkbox" id="optConnectionNotifications"> Enable connection notifications</label>
+        <label><input type="checkbox" id="optWakeLock"> Keep screen awake (wake lock)</label>
+        <label style="display:flex; align-items:center; gap:8px;">
+          Silence intervention (seconds)
+          <input id="optSilenceThreshold" type="number" min="0.3" max="10" step="0.1" value="5" style="width:90px; padding:4px 6px; border-radius:6px; border:1px solid #d1d5db;">
+        </label>
+      </div>
+    </div>
     <div style="max-width:480px; width:100%; text-align:left; margin-top:18px;">
       <h3>Player delay</h3>
       <p style="font-size:0.9em; color:#555; margin-top:8px;">Configure your per-player delay: + (if you sing too early) / - (if you sing too late).</p>
@@ -267,6 +279,11 @@
             <span id="capacityValue" style="font-size:0.9em; font-weight:500; color:#1f2937;">6 singers</span>
           </div>
           <input id="capacitySlider" type="range" min="1" max="6" step="1" value="6" style="width:100%;">
+        </div>
+        <div id="kickCard" style="width:100%; text-align:left; margin-top:12px; background:#fff; border:1px solid #f0d4d4; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+          <h3 style="margin-top:0;">Players</h3>
+          <p id="kickHelp" style="font-size:0.9em; color:#555; margin-bottom:12px;">Acquire control to kick a player.</p>
+          <div id="kickList" style="display:flex; flex-direction:column; gap:8px;"></div>
         </div>
         <div id="playlistModeCard" style="width:100%; text-align:left; margin-top:12px; background:#fff; border:1px solid #d6d6d6; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
           <h3 style="margin-top:0; display:flex; justify-content:space-between; align-items:center; gap:8px;">

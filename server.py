@@ -73,6 +73,7 @@ remote_control_user = ""  # empty string means free
 remote_control_text = ""
 # Track last-seen timestamp for each session id (heartbeat from clients)
 LAST_SEEN = {}
+STALE_SESSION_TIMEOUT = 6.0
 
 # Global rooms mapping: room name -> list of usernames
 ROOMS = {
@@ -1224,6 +1225,10 @@ load_room_capacity()
 SESSION_USERNAMES = {}
 # Optional mapping of session id -> preferred per-player delay (ms)
 SESSION_DELAYS = {}
+# Optional mapping of session id -> last-reported latency (ms)
+SESSION_LATENCIES = {}
+# Optional mapping of session id -> audio beacon info
+SESSION_AUDIO = {}
 # Optional mapping of session id -> most recent room selection
 SESSION_ROOMS = {}
 
@@ -1296,16 +1301,32 @@ def status():
         current_room = session.get('current_room')
         if sid and not current_room:
             current_room = SESSION_ROOMS.get(sid)
+        audio_payload = SESSION_AUDIO.get(sid) if sid else None
         user_payload = {
             'session_id': sid,
             'name': SESSION_USERNAMES.get(sid),
-            'room': current_room
+            'room': current_room,
+            'latency_ms': SESSION_LATENCIES.get(sid),
+            'audio_last_seen': audio_payload.get('last_seen') if isinstance(audio_payload, dict) else None,
+            'audio_level': audio_payload.get('level') if isinstance(audio_payload, dict) else None
         }
+        latency_by_name = {}
+        latency_counts = {}
+        for sid_k, uname in SESSION_USERNAMES.items():
+            latency = SESSION_LATENCIES.get(sid_k)
+            if latency is None:
+                continue
+            latency_by_name[uname] = latency_by_name.get(uname, 0) + latency
+            latency_counts[uname] = latency_counts.get(uname, 0) + 1
+        for uname, total in list(latency_by_name.items()):
+            count = latency_counts.get(uname, 1)
+            latency_by_name[uname] = int(round(total / max(1, count)))
         # prepare payload with rooms and control status
         payload = {
             'success': True,
             'rooms': {r: list(u) for r, u in ROOMS.items()},
             'capacity': dict(ROOM_CAPACITY),
+            'latency_by_name': latency_by_name,
             'audio_enabled': not CONTROL_ONLY_MODE,
             'control_only': CONTROL_ONLY_MODE,
             'control': {
@@ -1402,6 +1423,10 @@ def api():
             mgr.connect_microphone_to_sink(player_id, sink_index)
         except Exception:
             pass
+        try:
+            schedule_sink_repair(player_id, sink_index)
+        except Exception:
+            logger.exception('Failed to schedule sink repair for session %s', player_id)
 
         # record session info
         session['microphone_index'] = sink_index
@@ -1434,6 +1459,25 @@ def api():
     else:
         return jsonify({'success': False, 'error': 'Invalid action: ' + action})
     return jsonify({'success': True, 'answer': start_res.get('answer'), 'player_id': player_id})
+
+
+def schedule_sink_repair(player_id, sink_index, attempts=10):
+    """Retry linking a microphone to the intended sink after connection.
+
+    This mitigates rare cases where the stream links to the default output.
+    """
+    if CONTROL_ONLY_MODE:
+        return
+    def _worker():
+        mgr = WebRTCMicrophoneManager()
+        for delay in range(1, attempts + 1):
+            try:
+                time.sleep(delay)
+                mgr.connect_microphone_to_sink(player_id, sink_index)
+            except Exception:
+                logger.exception('Sink repair attempt failed for %s (delay %s)', player_id, delay)
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
 
 
 @app.route('/static/<path:path>')   # serve static files
@@ -1572,6 +1616,33 @@ def player_delay():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/client/metrics', methods=['POST'])
+def client_metrics():
+    """Receive lightweight client metrics (latency + audio level beacons)."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        sid = session.get('session_id')
+        if not sid:
+            return jsonify({'success': False, 'error': 'No session'}), 400
+        latency = data.get('latency_ms')
+        if latency is not None:
+            try:
+                SESSION_LATENCIES[sid] = int(latency)
+            except Exception:
+                pass
+        level = data.get('audio_level')
+        if level is not None:
+            try:
+                level_val = float(level)
+                SESSION_AUDIO[sid] = {'last_seen': time.time(), 'level': level_val}
+            except Exception:
+                pass
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.exception('Failed to store client metrics: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/control/auth', methods=['POST'])
 def control_auth():
     global CONTROL_PASSWORD
@@ -1654,7 +1725,8 @@ def control_keystroke():
     # sanitize and map keys to xdotool names
     allowed_special = {
         'Escape': 'Escape', 'Esc': 'Escape', 'Enter': 'Return', 'Return': 'Return', 'Backspace': 'BackSpace',
-        'Space': 'space', 'ArrowLeft': 'Left', 'ArrowRight': 'Right', 'ArrowUp': 'Up', 'ArrowDown': 'Down'
+        'Space': 'space', 'ArrowLeft': 'Left', 'ArrowRight': 'Right', 'ArrowUp': 'Up', 'ArrowDown': 'Down',
+        'F3': 'F3'
     }
     # If single printable character, send via type
     if len(key) == 1:
@@ -1944,6 +2016,10 @@ def rooms_join():
             try:
                 if sid in mgr.microphones:
                     mgr.connect_microphone_to_sink(sid, sink_index)
+                    try:
+                        schedule_sink_repair(sid, sink_index)
+                    except Exception:
+                        logger.exception('Failed to schedule sink repair for %s', sid)
             except Exception:
                 logger.exception('Failed to connect microphone for session %s to sink %s', sid, sink_index)
                 pass
@@ -2027,6 +2103,77 @@ def rooms_leave():
     except Exception:
         pass
     return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'capacity': dict(ROOM_CAPACITY)})
+
+
+@app.route('/rooms/kick', methods=['POST'])
+def rooms_kick():
+    """Kick a player out of all rooms and stop their microphone (control lock required)."""
+    global CONTROL_OWNER, CONTROL_OWNER_NAME, CONTROL_TIMESTAMP
+    guard = require_control_lock()
+    if guard is not None:
+        return guard
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        name = data.get('name')
+        sid = data.get('session_id')
+        targets = []
+        if sid is not None:
+            try:
+                targets.append(int(sid))
+            except Exception:
+                return jsonify({'success': False, 'error': 'Invalid session id'}), 400
+        if name:
+            for sid_k, uname in list(SESSION_USERNAMES.items()):
+                if uname == name and sid_k not in targets:
+                    targets.append(sid_k)
+        if not targets and name:
+            # Fall back to name-only removal if no session match found
+            for r, users in ROOMS.items():
+                if name in users:
+                    ROOMS[r] = [u for u in users if u != name]
+            try:
+                notify_rooms_update()
+            except Exception:
+                pass
+            try:
+                update_config_players()
+            except Exception:
+                pass
+            return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'capacity': dict(ROOM_CAPACITY)})
+        if not targets:
+            return jsonify({'success': False, 'error': 'No matching player found'}), 404
+
+        mgr = WebRTCMicrophoneManager()
+        for sid_target in targets:
+            try:
+                mgr.remove_microphone(sid_target)
+            except Exception:
+                logger.exception('Failed to remove microphone for %s', sid_target)
+            LAST_SEEN.pop(sid_target, None)
+            uname = SESSION_USERNAMES.pop(sid_target, None)
+            SESSION_ROOMS.pop(sid_target, None)
+            SESSION_DELAYS.pop(sid_target, None)
+            if uname:
+                for r, users in ROOMS.items():
+                    if uname in users:
+                        ROOMS[r] = [u for u in users if u != uname]
+            if CONTROL_OWNER == sid_target:
+                CONTROL_OWNER = None
+                CONTROL_OWNER_NAME = None
+                CONTROL_TIMESTAMP = 0
+
+        try:
+            notify_rooms_update()
+        except Exception:
+            pass
+        try:
+            update_config_players()
+        except Exception:
+            pass
+        return jsonify({'success': True, 'rooms': {r: list(u) for r, u in ROOMS.items()}, 'capacity': dict(ROOM_CAPACITY)})
+    except Exception as e:
+        logger.exception('Failed to kick player: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 def update_config_players():
     """Update config.ini P1..P6 and [Game] Players based on ROOMS.
@@ -2660,7 +2807,7 @@ if __name__ == '__main__':
                 now = time.time()
                 stale = []
                 for sid, last in list(LAST_SEEN.items()):
-                    if now - last > 10.0:
+                    if now - last > STALE_SESSION_TIMEOUT:
                         # If this session has an associated microphone process that is still alive,
                         # treat the session as active and skip stale removal.
                         try:

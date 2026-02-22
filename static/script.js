@@ -544,6 +544,95 @@ window.updateControlPasswordState = updateControlPasswordState;
 window.promptForControlPasswordIfNeeded = promptForControlPasswordIfNeeded;
 
 
+let wakeLockHandle = null;
+let wakeLockEnabled = false;
+let wakeLockVisibilityBound = false;
+let latencyByName = {};
+let lastStatusRttMs = null;
+let lastServerAudioSeenMs = null;
+let lastMetricsSentAt = 0;
+let serverAudioWarningAt = 0;
+
+function getSilenceInterventionMs() {
+    let seconds = 5;
+    try {
+        const stored = parseFloat(localStorage.getItem('optSilenceThresholdSeconds') || '5');
+        if (Number.isFinite(stored) && stored > 0) seconds = stored;
+    } catch (e) {}
+    return Math.max(0.3, Math.min(10, seconds)) * 1000;
+}
+
+function connectionNotificationsEnabled() {
+    try {
+        return localStorage.getItem('optConnectionNotifications') === 'true';
+    } catch (e) {
+        return false;
+    }
+}
+
+async function ensureNotificationPermission() {
+    if (!('Notification' in window)) return false;
+    if (Notification.permission === 'granted') return true;
+    if (Notification.permission === 'denied') return false;
+    try {
+        const res = await Notification.requestPermission();
+        return res === 'granted';
+    } catch (e) {
+        return false;
+    }
+}
+
+async function sendConnectionNotification(message) {
+    if (!connectionNotificationsEnabled()) return;
+    if (!('Notification' in window)) return;
+    const ok = await ensureNotificationPermission();
+    if (!ok) return;
+    try {
+        new Notification('Connection unstable', {body: message || 'Attempting to recover the microphone connection.'});
+    } catch (e) {
+        // ignore notification failures
+    }
+}
+
+async function applyWakeLockSetting(enabled) {
+    wakeLockEnabled = !!enabled;
+    if (!('wakeLock' in navigator)) return;
+    try {
+        if (!wakeLockEnabled) {
+            if (wakeLockHandle) {
+                await wakeLockHandle.release();
+                wakeLockHandle = null;
+            }
+            return;
+        }
+        if (!wakeLockHandle) {
+            wakeLockHandle = await navigator.wakeLock.request('screen');
+            wakeLockHandle.addEventListener('release', () => {
+                wakeLockHandle = null;
+            });
+        }
+    } catch (e) {
+        wakeLockHandle = null;
+    }
+}
+
+function bindWakeLockVisibilityHandler() {
+    if (wakeLockVisibilityBound) return;
+    wakeLockVisibilityBound = true;
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            if (wakeLockEnabled) {
+                applyWakeLockSetting(true);
+            }
+        } else {
+            if (wakeLockHandle) {
+                try { wakeLockHandle.release(); } catch (e) {}
+                wakeLockHandle = null;
+            }
+        }
+    });
+}
+
 const micHealth = {
     ui: {
         card: null,
@@ -560,7 +649,10 @@ const micHealth = {
     stream: null,
     silenceStart: null,
     warningShown: false,
-    reloadPromptShown: false
+    reloadPromptShown: false,
+    lastInterventionAt: 0,
+    interventionInFlight: false,
+    lastLevel: 0
 };
 
 function initMicHealthUI() {
@@ -648,8 +740,9 @@ function startMicLevelLoop() {
             const v = (micHealth.dataArray[i] - 128) / 128;
             sum += v * v;
         }
-        const rms = Math.sqrt(sum / micHealth.dataArray.length);
+    const rms = Math.sqrt(sum / micHealth.dataArray.length);
         const level = Math.min(1, rms * 2);
+    micHealth.lastLevel = level;
         if (micHealth.ui.levelFill) {
             micHealth.ui.levelFill.style.transform = `scaleX(${level})`;
             micHealth.ui.levelFill.style.background = level > 0.6 ? '#22c55e' : (level > 0.3 ? '#facc15' : '#f97316');
@@ -666,15 +759,31 @@ function startMicLevelLoop() {
         if (level < silenceThreshold) {
             if (!micHealth.silenceStart) {
                 micHealth.silenceStart = now;
-            } else if (!micHealth.warningShown && now - micHealth.silenceStart > 5000) {
-                micHealth.warningShown = true;
-                showMicReloadPrompt('We are not receiving audio from your mic. Please reload to wake it up.');
+            } else {
+                const silenceMs = now - micHealth.silenceStart;
+                const interventionMs = getSilenceInterventionMs();
+                if (silenceMs > interventionMs && !micHealth.interventionInFlight) {
+                    const cooldown = 15000;
+                    if (now - micHealth.lastInterventionAt > cooldown) {
+                        micHealth.lastInterventionAt = now;
+                        micHealth.interventionInFlight = true;
+                        setMicStatusMessage('Connection unstable — reconnecting…', {severity: 'warn'});
+                        try { window.triggerConnectionIntervention && window.triggerConnectionIntervention('silence'); } catch (e) {}
+                        sendConnectionNotification('Connection unstable — reconnecting to your room.');
+                        setTimeout(() => { micHealth.interventionInFlight = false; }, 4000);
+                    }
+                }
+                if (!micHealth.warningShown && silenceMs > interventionMs * 3) {
+                    micHealth.warningShown = true;
+                    showMicReloadPrompt('We are not receiving audio from your mic. Please reload to wake it up.');
+                }
             }
         } else {
             micHealth.silenceStart = null;
             if (!micHealth.reloadPromptShown) {
                 setMicStatusMessage('Microphone is sending audio.', {severity: 'ok', showReload: false});
             }
+            micHealth.warningShown = false;
         }
         micHealth.raf = requestAnimationFrame(step);
     };
@@ -705,6 +814,28 @@ function attachMicStreamToMeter(stream) {
     micHealth.source.connect(micHealth.analyser);
     setMicStatusMessage('Listening for audio…', {severity: 'info'});
     startMicLevelLoop();
+}
+
+async function sendClientMetrics() {
+    if (CONTROL_ONLY_MODE) return;
+    if (!micHealth.stream) return;
+    const now = Date.now();
+    if (now - lastMetricsSentAt < 900) return;
+    lastMetricsSentAt = now;
+    const payload = {
+        latency_ms: lastStatusRttMs,
+        audio_level: micHealth.lastLevel
+    };
+    try {
+        await fetch('/client/metrics', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        // ignore metrics errors
+    }
 }
 
 function handleFirstPermissionReloadHint() {
@@ -775,6 +906,24 @@ document.addEventListener('DOMContentLoaded', function() {
         if (room === 'lobby') return 'Lobby';
         const idx = MIC_ROOM_KEYS.indexOf(room);
         return idx >= 0 ? `Mic ${idx + 1}` : room;
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function renderNameLabel(name, isSelf) {
+        const safeName = escapeHtml(name);
+        const latency = latencyByName && Object.prototype.hasOwnProperty.call(latencyByName, name)
+            ? latencyByName[name]
+            : null;
+        const latencyLabel = Number.isFinite(latency) ? `<span style="font-size:0.8em; color:#64748b;"> (${latency} ms)</span>` : '';
+        return isSelf ? `<strong>${safeName}</strong>${latencyLabel}` : `${safeName}${latencyLabel}`;
     }
 
     function showRoomMessage(text, options = {}) {
@@ -1159,6 +1308,49 @@ document.addEventListener('DOMContentLoaded', function() {
                     localStorage.setItem('optLockScreenMicBar', micBarEl.checked);
                 });
             }
+
+            if (localStorage.getItem('optConnectionNotifications') === null) {
+                localStorage.setItem('optConnectionNotifications', 'false');
+            }
+            const notifyEl = document.getElementById('optConnectionNotifications');
+            if (notifyEl) {
+                notifyEl.checked = localStorage.getItem('optConnectionNotifications') === 'true';
+                notifyEl.addEventListener('change', async () => {
+                    localStorage.setItem('optConnectionNotifications', notifyEl.checked);
+                    if (notifyEl.checked) {
+                        await ensureNotificationPermission();
+                    }
+                });
+            }
+
+            if (localStorage.getItem('optWakeLock') === null) {
+                localStorage.setItem('optWakeLock', 'false');
+            }
+            const wakeEl = document.getElementById('optWakeLock');
+            if (wakeEl) {
+                wakeEl.checked = localStorage.getItem('optWakeLock') === 'true';
+                wakeEl.addEventListener('change', () => {
+                    localStorage.setItem('optWakeLock', wakeEl.checked);
+                    applyWakeLockSetting(wakeEl.checked);
+                });
+                bindWakeLockVisibilityHandler();
+                applyWakeLockSetting(wakeEl.checked);
+            }
+
+            const silenceInput = document.getElementById('optSilenceThreshold');
+            if (silenceInput) {
+                const current = getSilenceInterventionMs() / 1000;
+                silenceInput.value = String(current);
+                silenceInput.addEventListener('change', () => {
+                    let val = parseFloat(silenceInput.value);
+                    if (!Number.isFinite(val) || val <= 0) {
+                        val = 5;
+                    }
+                    val = Math.max(0.3, Math.min(10, val));
+                    silenceInput.value = String(val);
+                    localStorage.setItem('optSilenceThresholdSeconds', String(val));
+                });
+            }
         } catch (e) { }
     }
     // Initialize delay control
@@ -1293,6 +1485,21 @@ document.addEventListener('DOMContentLoaded', function() {
         updateRoomDisplays();
     }
 
+    window.triggerConnectionIntervention = async function(reason) {
+        if (!userName) return;
+        const prevRoom = desiredRoom || currentRoom || 'lobby';
+        if (prevRoom === 'lobby') return;
+        if (Date.now() < autoRejoinSuppressedUntil) return;
+        showRoomMessage('Connection unstable — reconnecting…', {severity: 'warn'});
+        try {
+            await attemptServerJoin('lobby', {silent: true, suppressMs: 2000});
+            await new Promise(resolve => setTimeout(resolve, 900));
+            await attemptServerJoin(prevRoom, {silent: true, suppressMs: 2000});
+        } catch (e) {
+            printLog('Intervention reconnect failed: ' + e);
+        }
+    };
+
     function updateRoomDisplays() {
     //printLog(`Room state updated: ${JSON.stringify(rooms)}`);
         // Update lobby
@@ -1302,8 +1509,7 @@ document.addEventListener('DOMContentLoaded', function() {
         } else {
             rooms.lobby.forEach(name => {
                 let span = document.createElement('span');
-                span.textContent = name;
-                if (name === userName) span.style.fontWeight = 'bold';
+                span.innerHTML = renderNameLabel(name, name === userName);
                 lobbyNamesDiv.appendChild(span);
             });
         }
@@ -1319,12 +1525,13 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             if (currentMembers.length > 0) {
                 box.classList.add('occupied');
-                userSpan.innerHTML = currentMembers.map(n => n === userName ? `<strong>${n}</strong>` : n).join(', ');
+                userSpan.innerHTML = currentMembers.map(n => renderNameLabel(n, n === userName)).join(', ');
             } else {
                 box.classList.remove('occupied');
                 userSpan.innerHTML = '';
             }
         });
+        try { window.roomsState = JSON.parse(JSON.stringify(rooms)); } catch (e) { window.roomsState = rooms; }
         //printLog(`Room state updated: ${JSON.stringify(rooms)}`);
     }
 
@@ -1357,8 +1564,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // the server will disconnect its webrtc session.
     async function pollStatus() {
         try {
+            const startedAt = performance.now();
             const res = await fetch('/status', {credentials: 'include'});
             const data = await res.json();
+            lastStatusRttMs = Math.round(performance.now() - startedAt);
             if (data && data.success) {
                 if (data.rooms) {
                     rooms = data.rooms;
@@ -1367,6 +1576,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 if (data.capacity) {
                     setRoomCapacityState(data.capacity);
+                }
+                if (data.latency_by_name) {
+                    latencyByName = data.latency_by_name || {};
                 }
                 if (data.you) {
                     const reported = data.you.room || null;
@@ -1377,6 +1589,19 @@ document.addEventListener('DOMContentLoaded', function() {
                         if ((now >= autoRejoinSuppressedUntil) || serverMatchesDesired) {
                             if (reported !== currentRoom) {
                                 rememberCurrentRoom(reported);
+                            }
+                        }
+                    }
+                    if (data.you.audio_last_seen) {
+                        lastServerAudioSeenMs = data.you.audio_last_seen * 1000;
+                        const nowMs = Date.now();
+                        const serverStaleMs = Math.max(4000, getSilenceInterventionMs());
+                        if (micHealth.stream && nowMs - lastServerAudioSeenMs > serverStaleMs) {
+                            if (nowMs - serverAudioWarningAt > 15000) {
+                                serverAudioWarningAt = nowMs;
+                                setMicStatusMessage('Server not receiving audio — reconnecting…', {severity: 'warn'});
+                                try { window.triggerConnectionIntervention && window.triggerConnectionIntervention('server_audio'); } catch (e) {}
+                                sendConnectionNotification('Server not receiving audio — reconnecting to your room.');
                             }
                         }
                     }
@@ -1397,6 +1622,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // initial poll and interval
     pollStatus();
     setInterval(pollStatus, 2000);
+    setInterval(sendClientMetrics, 1000);
 
     // Start a WebRTC session with the server: create RTCPeerConnection, capture local mic,
     // send SDP offer to server (/api?action=start_webrtc) and apply returned SDP answer.
@@ -1817,6 +2043,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const controlTextInput = document.getElementById('controlTextInput');
     const keyboardButtonsDiv = document.getElementById('keyboardButtons');
     const controlArea = document.getElementById('controlArea');
+    const kickListEl = document.getElementById('kickList');
+    const kickHelpEl = document.getElementById('kickHelp');
 
     let controlOwner = null;
     let controlName = null;
@@ -1858,6 +2086,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 // ignore
             }
         }
+        renderKickList();
     }
 
     window.__setPlaylistControlsLocked = function(flag) {
@@ -2120,7 +2349,7 @@ document.addEventListener('DOMContentLoaded', function() {
         searchBtn.addEventListener('click', () => {
             try {
                 if (controlTextInput) {
-                    const ev = new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true });
+                    const ev = new KeyboardEvent('keydown', { key: 'J', bubbles: true, cancelable: true });
                     controlTextInput.dispatchEvent(ev);
                 }
             } catch (e) {
@@ -2296,6 +2525,83 @@ document.addEventListener('DOMContentLoaded', function() {
     // Poll control status every 2s
     fetchControlStatus();
     setInterval(fetchControlStatus, 2000);
+
+    function renderKickList() {
+        if (!kickListEl) return;
+        const localName = localStorage.getItem('userName') || '';
+        const hasLock = !!controlOwner && !!controlName && !!localName && (controlName === localName);
+        if (kickHelpEl) {
+            kickHelpEl.textContent = hasLock ? 'Tap a player to remove them.' : 'Acquire control to kick a player.';
+        }
+        const state = window.roomsState || {};
+        const entries = [];
+        Object.keys(state).forEach((room) => {
+            const members = Array.isArray(state[room]) ? state[room] : [];
+            members.forEach((name) => entries.push({room, name}));
+        });
+        kickListEl.innerHTML = '';
+        if (!entries.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'No players connected.';
+            empty.style.color = '#666';
+            kickListEl.appendChild(empty);
+            return;
+        }
+        entries.forEach((entry) => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.justifyContent = 'space-between';
+            row.style.alignItems = 'center';
+            row.style.gap = '8px';
+
+            const label = document.createElement('div');
+            label.textContent = `${entry.name} · ${entry.room}`;
+            label.style.flex = '1';
+
+            const btn = document.createElement('button');
+            btn.textContent = 'Kick';
+            btn.style.flex = '0 0 auto';
+            btn.style.background = '#ef4444';
+            btn.style.color = '#fff';
+            btn.style.border = 'none';
+            btn.style.borderRadius = '8px';
+            btn.style.padding = '6px 10px';
+            btn.disabled = !hasLock;
+            btn.addEventListener('click', async () => {
+                if (!hasLock) return;
+                const confirmed = window.confirm(`Kick ${entry.name} from ${entry.room}?`);
+                if (!confirmed) return;
+                btn.disabled = true;
+                try {
+                    const res = await fetch('/rooms/kick', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        credentials: 'include',
+                        body: JSON.stringify({name: entry.name})
+                    });
+                    const data = await res.json();
+                    if (!data || !data.success) {
+                        throw new Error((data && data.error) || 'Kick failed');
+                    }
+                    if (data.rooms) {
+                        window.roomsState = data.rooms;
+                    }
+                    printLog(`${entry.name} was kicked.`);
+                } catch (e) {
+                    printLog('Kick error: ' + e.message);
+                } finally {
+                    btn.disabled = false;
+                    renderKickList();
+                }
+            });
+
+            row.appendChild(label);
+            row.appendChild(btn);
+            kickListEl.appendChild(row);
+        });
+    }
+
+    setInterval(renderKickList, 2000);
 
     // Release control on unload if we are the owner
     window.addEventListener('beforeunload', () => {
